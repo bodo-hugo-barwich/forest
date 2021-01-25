@@ -4,8 +4,6 @@
 #[cfg(test)]
 mod peer_test;
 
-use crate::SyncStage;
-
 use super::bad_block_cache::BadBlockCache;
 use super::bucket::{SyncBucket, SyncBucketSet};
 use super::sync_state::SyncState;
@@ -204,7 +202,6 @@ where
                 });
             }
             NetworkEvent::PeerDialed { peer_id } => {
-                error!("PEER DIALED, SEND HELLO");
                 let heaviest = self
                     .state_manager
                     .chain_store()
@@ -268,11 +265,6 @@ where
                 return;
             }
         };
-        info!(
-            "Received block over GossipSub: {} from {}",
-            block.header.epoch(),
-            source
-        );
 
         // Get bls_messages in the store or over Bitswap
         let bls_messages: Vec<_> = block
@@ -304,7 +296,6 @@ where
             secp_messages,
         };
         let ts = FullTipset::new(vec![block]).unwrap();
-        info!("Gossipblock formed: {}", ts.epoch());
         if channel.send((source, ts)).await.is_err() {
             error!("Failed to update peer list, receiver dropped");
         }
@@ -327,10 +318,8 @@ where
         loop {
             // TODO would be ideal if this is a future attached to the select
             if worker_tx.is_empty() {
-                println!("Worker_tx is empty!");
                 if let Some(tar) = self.next_sync_target.take() {
                     if let Some(ts) = tar.heaviest_tipset() {
-                        info!("Gunna sent through channel now!!!");
                         self.active_sync_tipsets.insert(ts.clone());
                         worker_tx
                             .send(ts)
@@ -346,7 +335,6 @@ where
                 },
                 inform_head_event = fused_inform_channel.next() => match inform_head_event {
                     Some((peer, new_head)) => {
-                        info!("Informing new head: {}", new_head.epoch());
                         if let Err(e) = self.inform_new_head(peer.clone(), &new_head).await {
                             warn!("failed to inform new head from peer {}: {}", peer, e);
                         }
@@ -426,22 +414,11 @@ where
             // Currently needed to go GT because equal tipsets are attempted to be synced.
             .map(|heaviest| ts.weight() > heaviest.weight())
             .unwrap_or(true);
-        info!(
-            "New tipset heavier than heaviest: {}, and heaviest weight: {:?}, new weight: {}",
-            candidate_ts,
-            self.state_manager
-                .chain_store()
-                .heaviest_tipset()
-                .await
-                .map(|e| e.weight().clone()),
-            ts.weight()
-        );
         if candidate_ts {
             // Check message meta after all other checks (expensive)
             for block in ts.blocks() {
                 self.validate_msg_meta(block)?;
             }
-            info!("Setting peer head");
             self.set_peer_head(peer, Arc::new(ts.to_tipset())).await;
         }
 
@@ -455,7 +432,6 @@ where
             .await;
 
         // Only update target on initial sync
-        info!("ChainSync state: {:?}", *self.state.lock().await);
         if *self.state.lock().await == ChainSyncState::Bootstrap {
             if let Some(best_target) = self.select_sync_target().await {
                 self.schedule_tipset(best_target).await;
@@ -546,16 +522,11 @@ where
             if let Some(target) = act_state.read().await.target() {
                 // Already currently syncing this, so just return
                 if target == &tipset {
-                    info!(
-                        "Tipset {} is already currently being synced. Skipping it.",
-                        tipset.epoch()
-                    );
                     return;
                 }
                 // The new tipset is the successor block of a block being synced, add it to queue.
                 // We might need to check if it is still currently syncing or if it is complete...
                 if tipset.parents() == target.key() {
-                    info!("Tipset {} is the next block!", tipset.epoch());
                     self.sync_queue.insert(tipset);
                     if self.next_sync_target.is_none() {
                         if let Some(target_bucket) = self.sync_queue.pop() {
@@ -568,10 +539,6 @@ where
         }
 
         if self.sync_queue.related_to_any(&tipset) {
-            info!(
-                "Tipset {} is related to something in the queue",
-                tipset.epoch()
-            );
             self.sync_queue.insert(tipset);
             if self.next_sync_target.is_none() {
                 if let Some(target_bucket) = self.sync_queue.pop() {

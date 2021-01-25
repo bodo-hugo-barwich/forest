@@ -253,7 +253,7 @@ where
             info!("Fork Synced");
             return_set.extend(fork);
         }
-        info!("Sync Header reverse complete");
+        debug!("Sync Header reverse complete");
         Ok(return_set)
     }
 
