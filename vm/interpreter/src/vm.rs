@@ -198,6 +198,10 @@ where
                 if let Some(cb) = &mut callback {
                     cb(&cid, msg, &ret)?;
                 }
+                println!(
+                    "{} {} {}",
+                    cid, ret.msg_receipt.gas_used, ret.msg_receipt.exit_code as u64
+                );
 
                 // Update totals
                 gas_reward += &ret.miner_tip;
