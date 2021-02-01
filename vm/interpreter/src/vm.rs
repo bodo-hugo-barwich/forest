@@ -374,25 +374,29 @@ where
 
         self.state.snapshot()?;
 
+        let epoch = self.epoch;
         let (mut ret_data, rt, mut act_err) = self.send(msg.message(), Some(msg_gas_cost));
         if let Some(err) = &act_err {
             if err.is_fatal() {
                 return Err(format!(
-                    "[from={}, to={}, seq={}, m={}, h={}] fatal error: {}",
+                    "[cid={}, from={}, to={}, seq={}, m={}, h={}] fatal error: {}",
+                    msg.cid().unwrap(),
                     msg.from(),
                     msg.to(),
                     msg.sequence(),
                     msg.method_num(),
-                    self.epoch,
+                    epoch,
                     err
                 ));
             } else {
                 debug!(
-                    "[from={}, to={}, seq={}, m={}] send error: {}",
+                    "[cid={}, from={}, to={}, seq={}, m={}, epoch={}] send error: {}",
+                    msg.cid().unwrap(),
                     msg.from(),
                     msg.to(),
                     msg.sequence(),
                     msg.method_num(),
+                    epoch,
                     err
                 );
                 if !ret_data.is_empty() {
