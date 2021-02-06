@@ -1,0 +1,1 @@
+initSidebarItems({"constant":[["BLOCK_MESSAGE_LIMIT","Limit of bls and secp messages combined in a block."]],"enum":[["Error","Blockchain blocks error"]],"mod":[["election_proof",""],["gossip_block",""],["header",""],["ticket",""],["tipset",""]],"struct":[["Block","A complete block"],["TxMeta","Tracks the merkleroots of both secp and bls messages separately"]]});

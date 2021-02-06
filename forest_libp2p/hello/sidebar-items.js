@@ -1,0 +1,1 @@
+initSidebarItems({"constant":[["HELLO_PROTOCOL_ID",""]],"struct":[["HelloProtocolName","Type to satisfy `ProtocolName` interface for Hello RPC."],["HelloRequest","Hello message https://filecoin-project.github.io/specs/#hello-spec"],["HelloResponse","Response to a Hello"]],"type":[["HelloCodec","Hello protocol codec to be used within the RPC service."]]});
