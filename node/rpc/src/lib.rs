@@ -90,7 +90,7 @@ where
     use wallet_api::*;
 
     let rpc_server = Server::new()
-        .with_data(Data::new(state))
+        .with_data(Data::new(Arc::clone(&state)))
         // Auth API
         .with_method("Filecoin.AuthNew", auth_new::<DB, KS, B>, false)
         .with_method("Filecoin.AuthVerify", auth_verify::<DB, KS, B>, false)
@@ -379,13 +379,13 @@ where
                         let request_text = message.into_text()?;
 
                         if request_text.is_empty() {
-                            Ok(())
+                            // Ok(())
                         } else {
                             info!("RPC Request Received: {:?}", request_text.clone());
 
-                            match serde_json::from_str(&request_text)
-                                as Result<RequestObject, serde_json::Error>
-                            {
+                            let req: Result<RequestObject, serde_json::Error> =
+                                serde_json::from_str(&request_text);
+                            match req {
                                 Ok(call) => {
                                     // hacky but due to the limitations of jsonrpc_v2 impl
                                     // if this expands, better to implement some sort of middleware
@@ -399,8 +399,8 @@ where
 
                                     // TODO remove this manually constructed RPC response
                                     #[derive(Serialize)]
-                                    struct SubscribeChannelIDResponse<'a> {
-                                        json_rpc: &'a str,
+                                    struct SubscribeChannelIDResponse {
+                                        json_rpc: &'static str,
                                         result: usize,
                                         id: Id,
                                     }
@@ -429,14 +429,24 @@ where
                                         ws_stream.send_json(&response).await?;
                                     }
 
-                                    Ok(())
+                                    // Ok(())
                                 }
-                                Err(e) => ws_stream.send_json(&get_error(1, e.to_string())).await,
+                                Err(e) => {
+                                    let err = get_error(1, e.to_string());
+                                    let r = ws_stream.send_json(&err);
+                                    r.await?;
+                                    // Ok(())
+                                }
                             }
                         }
                     }
-                    Err(e) => ws_stream.send_json(&get_error(2, e.to_string())).await,
-                };
+                    Err(e) => {
+                        let err = get_error(2, e.to_string());
+                        let fut = ws_stream.send_json(&err);
+                        fut.await?;
+                        // Ok(())
+                    }
+                }
             }
 
             Ok(())
@@ -500,14 +510,18 @@ where
 //     }
 // }
 
-fn get_error(code: i64, message: String) -> ResponseObjects {
-    ResponseObjects::One(ResponseObject::Error {
-        jsonrpc: V2,
-        error: Error::Full {
-            code,
-            message,
-            data: None,
-        },
+// TODO fix or replace
+#[derive(Serialize)]
+struct TempError {
+    json_rpc: &'static str,
+    error: String,
+    id: Id,
+}
+
+fn get_error(code: i64, message: String) -> TempError {
+    TempError {
+        json_rpc: "2.0",
+        error: message,
         id: Id::Null,
-    })
+    }
 }
