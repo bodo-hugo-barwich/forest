@@ -19,6 +19,14 @@ jobs:
     container: debian:buster
 
     steps:
+      # List all installed Rust Libraries
+      - name: List all installed Rust Libraries
+        run: dpkg --get-selections | grep -i rust | sort
+        
+      # List all installed Rust Libraries
+      - name: List available Rust Libraries
+        run: apt-cache search rust | sort
+        
       # Downloads a copy of the code in your repository before running CI tests
       - name: Check out repository code
         uses: actions/checkout@v2
