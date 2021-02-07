@@ -35,7 +35,7 @@ jobs:
       # Show Environment and Compiler Version
       - name: Show Environment and Compiler Version
         run: | 
-          echo "Operating System:" && uname -a
+          echo "Operating System:" && cat /etc/os-release
           echo "Rust Compiler Version:" && rustc --version
         
       # Downloads a copy of the code in your repository before running CI tests
