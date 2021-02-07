@@ -32,6 +32,12 @@ jobs:
       - name: Install dependencies
         run: apt-get -y install rustc rust-src rust-gdb cargo libstd-rust-dev libstd-rust-1.41
         
+      # Show Environment and Compiler Version
+      - name: Show Environment and Compiler Version
+        run: | 
+          echo "Operating System:" && uname -a
+          echo "Rust Compiler Version:" && rustc --version
+        
       # Downloads a copy of the code in your repository before running CI tests
       - name: Check out repository code
         uses: actions/checkout@v2
