@@ -21,20 +21,20 @@ jobs:
     steps:
       # List all installed Rust Libraries
       - name: List all installed Rust Libraries
-        run: dpkg --get-selections | grep -i rust | sort
+        run: dpkg --get-selections | grep -i rust | wc -l && dpkg --get-selections | grep -i rust | sort
         
       # List all installed Rust Libraries
       - name: List available Rust Libraries
-        run: apt-cache search rust | sort
-        
-      # Downloads a copy of the code in your repository before running CI tests
-      - name: Check out repository code
-        uses: actions/checkout@v2
+        run: cat /etc/apt/sources.list && apt-get update && apt-cache search rust | sort
 
       # Performs a clean installation of all dependencies in the `package.json` file
       # For more information, see https://docs.npmjs.com/cli/ci.html
       - name: Install dependencies
         run: apt-get -y install rustc rust-src rust-gdb cargo libstd-rust-dev libstd-rust-1.41
+        
+      # Downloads a copy of the code in your repository before running CI tests
+      - name: Check out repository code
+        uses: actions/checkout@v2
 
       - name: Build
         run: cargo build --verbose
