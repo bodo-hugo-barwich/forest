@@ -1,17 +1,17 @@
-name: Rust
+name: Testing on Ubuntu
 
 on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
      branches:    
-      - master  
+      - main  
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  ubuntu-testing:
 
     runs-on: ubuntu-20.04
 
