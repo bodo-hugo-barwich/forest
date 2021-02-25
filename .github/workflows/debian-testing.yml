@@ -32,6 +32,7 @@ jobs:
       - name: Install dependencies
         run: |
           mkdir ../rust_download && cd ../rust_download
+          apt-get -y install wget
           wget http://ftp.debian.org/debian/pool/main/r/rustc/libstd-rust-1.48_1.48.0+dfsg1-2_amd64.deb
           wget http://ftp.debian.org/debian/pool/main/r/rustc/libstd-rust-dev_1.48.0+dfsg1-2_amd64.deb
           wget http://ftp.debian.org/debian/pool/main/r/rustc/rustc_1.48.0+dfsg1-2_amd64.deb
