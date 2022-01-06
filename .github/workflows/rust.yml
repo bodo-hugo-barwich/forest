@@ -28,11 +28,12 @@ jobs:
     - name: Show Environment and Compiler Version
       run: | 
         echo "Operating System:" && cat /etc/os-release
+        echo "RustUp Help:" && rustup help
         echo "Rust Compiler Version:" && rustc --version
         
     - uses: actions/checkout@v2
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+#    - name: Build
+#      run: cargo build --verbose
+#    - name: Run tests
+#      run: cargo test --verbose
 
