@@ -14,6 +14,9 @@ jobs:
   ubuntu-testing:
 
     runs-on: ubuntu-20.04
+    strategy:
+      matrix:
+        rust-version: [1.55.0, 1.57.0, 1.48.0]
 
     steps:
     # List all installed Rust Libraries
@@ -34,6 +37,13 @@ jobs:
       run: | 
         echo "Operating System:" && cat /etc/os-release
         echo "RustUp Help:" && rustup help
+        echo "Rust Compiler Version:" && rustc --version
+        
+    # Install Rust Version according to Test Matrix
+    - name: Install Rust Version '${{ matrix.node-version }}'
+      run: | 
+        echo "Requested Rust Compiler Version:" ${{ matrix.node-version }}
+        rustup install ${{ matrix.node-version }}
         echo "Rust Compiler Version:" && rustc --version
         
     - uses: actions/checkout@v2
