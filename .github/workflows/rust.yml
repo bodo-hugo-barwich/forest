@@ -20,6 +20,10 @@ jobs:
     - name: List all installed Rust Libraries
       run: dpkg --get-selections | grep -i rust | wc -l && dpkg --get-selections | grep -i rust | sort
         
+    # List all available Rust Libraries
+    - name: List available Rust Libraries
+      run: cat /etc/apt/sources.list && apt-get update && apt-cache search rust | sort
+        
     # Show Environment and Compiler Version
     - name: Show Environment and Compiler Version
       run: | 
