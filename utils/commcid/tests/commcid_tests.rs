@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use cid::{multihash::MultihashDigest, Cid, Code};
@@ -33,7 +33,7 @@ fn cid_to_comm_d() {
 
     // Correct hash format
     let mh = cid::Multihash::wrap(cid::SHA2_256_TRUNC254_PADDED, &comm).unwrap();
-    let c = Cid::new_v1(cid::FIL_COMMITMENT_UNSEALED, mh.clone());
+    let c = Cid::new_v1(cid::FIL_COMMITMENT_UNSEALED, mh);
     let decoded = cid_to_data_commitment_v1(&c).unwrap();
     assert_eq!(decoded, comm);
 
@@ -64,7 +64,7 @@ fn cid_to_comm_r() {
 
     // Correct hash format
     let mh = cid::Multihash::wrap(cid::POSEIDON_BLS12_381_A1_FC1, &comm).unwrap();
-    let c = Cid::new_v1(cid::FIL_COMMITMENT_SEALED, mh.clone());
+    let c = Cid::new_v1(cid::FIL_COMMITMENT_SEALED, mh);
     let decoded = cid_to_replica_commitment_v1(&c).unwrap();
     assert_eq!(decoded, comm);
 

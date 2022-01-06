@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 mod policy;
@@ -8,27 +8,30 @@ mod types;
 pub use self::policy::*;
 pub use self::state::*;
 pub use self::types::*;
+use crate::miner::DeferredCronEventParams;
 use crate::miner::MinerConstructorParams;
-use crate::reward::Method as RewardMethod;
+use crate::reward::ThisEpochRewardReturn;
 use crate::{
-    check_empty_params, init, make_map, make_map_with_root, miner, ActorDowncast, Multimap,
-    CALLER_TYPES_SIGNABLE, CRON_ACTOR_ADDR, INIT_ACTOR_ADDR, MINER_ACTOR_CODE_ID,
-    REWARD_ACTOR_ADDR, SYSTEM_ACTOR_ADDR,
+    init, miner, ActorDowncast, Multimap, CALLER_TYPES_SIGNABLE, CRON_ACTOR_ADDR, INIT_ACTOR_ADDR,
+    MINER_ACTOR_CODE_ID, REWARD_ACTOR_ADDR, SYSTEM_ACTOR_ADDR,
 };
+use crate::{make_map_with_root_and_bitwidth, reward::Method as RewardMethod};
 use address::Address;
 use ahash::AHashSet;
-use fil_types::{NetworkVersion, SealVerifyInfo};
+use fil_types::{SealVerifyInfo, HAMT_BIT_WIDTH};
 use indexmap::IndexMap;
 use ipld_blockstore::BlockStore;
+use log::info;
+use log::{debug, error};
 use num_bigint::bigint_ser::{BigIntDe, BigIntSer};
 use num_derive::FromPrimitive;
-use num_traits::FromPrimitive;
+use num_traits::{FromPrimitive, Signed, Zero};
 use runtime::{ActorCode, Runtime};
 use vm::{
     actor_error, ActorError, ExitCode, MethodNum, Serialized, TokenAmount, METHOD_CONSTRUCTOR,
 };
 
-// * Updated to specs-actors commit: e195950ba98adb8ce362030356bf4a3809b7ec77 (v2.3.2)
+// * Updated to specs-actors commit: 999e57a151cc7ada020ca2844b651499ab8c0dec (v3.0.1)
 
 /// GasOnSubmitVerifySeal is amount of gas charged for SubmitPoRepForBulkVerify
 /// This number is empirically determined
@@ -62,21 +65,12 @@ impl Actor {
     {
         rt.validate_immediate_caller_is(std::iter::once(&*SYSTEM_ACTOR_ADDR))?;
 
-        let empty_map = make_map::<_, ()>(rt.store()).flush().map_err(|e| {
+        let st = State::new(rt.store()).map_err(|e| {
             e.downcast_default(
                 ExitCode::ErrIllegalState,
-                "Failed to create storage power state",
+                "Failed to create power actor state",
             )
         })?;
-
-        let empty_mmap = Multimap::new(rt.store()).root().map_err(|e| {
-            e.downcast_default(
-                ExitCode::ErrIllegalState,
-                "Failed to get empty multimap cid",
-            )
-        })?;
-
-        let st = State::new(empty_map, empty_mmap);
         rt.create(&st)?;
         Ok(())
     }
@@ -95,7 +89,7 @@ impl Actor {
         let constructor_params = Serialized::serialize(MinerConstructorParams {
             owner: params.owner,
             worker: params.worker,
-            seal_proof_type: params.seal_proof_type,
+            window_post_proof_type: params.window_post_proof_type,
             peer_id: params.peer,
             multi_addresses: params.multiaddrs,
             control_addresses: Default::default(),
@@ -116,16 +110,17 @@ impl Actor {
             )?
             .deserialize()?;
 
-        let seal_proof_type = params.seal_proof_type;
+        let window_post_proof_type = params.window_post_proof_type;
         rt.transaction(|st: &mut State, rt| {
-            let mut claims = make_map_with_root(&st.claims, rt.store()).map_err(|e| {
-                e.downcast_default(ExitCode::ErrIllegalState, "failed to load claims")
-            })?;
+            let mut claims =
+                make_map_with_root_and_bitwidth(&st.claims, rt.store(), HAMT_BIT_WIDTH).map_err(
+                    |e| e.downcast_default(ExitCode::ErrIllegalState, "failed to load claims"),
+                )?;
             set_claim(
                 &mut claims,
                 &id_address,
                 Claim {
-                    seal_proof_type,
+                    window_post_proof_type,
                     quality_adj_power: Default::default(),
                     raw_byte_power: Default::default(),
                 },
@@ -138,17 +133,15 @@ impl Actor {
             })?;
             st.miner_count += 1;
 
-            if rt.network_version() >= NetworkVersion::V7 {
-                st.update_stats_for_new_miner(seal_proof_type)
-                    .map_err(|e| {
-                        actor_error!(
-                            ErrIllegalState,
-                            "failed to update power stats for new miner {}: {}",
-                            &id_address,
-                            e
-                        )
-                    })?;
-            }
+            st.update_stats_for_new_miner(window_post_proof_type)
+                .map_err(|e| {
+                    actor_error!(
+                        ErrIllegalState,
+                        "failed to update power stats for new miner {}: {}",
+                        &id_address,
+                        e
+                    )
+                })?;
 
             st.claims = claims.flush().map_err(|e| {
                 e.downcast_default(ExitCode::ErrIllegalState, "failed to flush claims")
@@ -175,9 +168,10 @@ impl Actor {
         let miner_addr = *rt.message().caller();
 
         rt.transaction(|st: &mut State, rt| {
-            let mut claims = make_map_with_root(&st.claims, rt.store()).map_err(|e| {
-                e.downcast_default(ExitCode::ErrIllegalState, "failed to load claims")
-            })?;
+            let mut claims =
+                make_map_with_root_and_bitwidth(&st.claims, rt.store(), HAMT_BIT_WIDTH).map_err(
+                    |e| e.downcast_default(ExitCode::ErrIllegalState, "failed to load claims"),
+                )?;
 
             st.add_to_claim(
                 &mut claims,
@@ -224,10 +218,15 @@ impl Actor {
         }
 
         rt.transaction(|st: &mut State, rt| {
-            let mut events =
-                Multimap::from_root(rt.store(), &st.cron_event_queue).map_err(|e| {
-                    e.downcast_default(ExitCode::ErrIllegalState, "failed to load cron events")
-                })?;
+            let mut events = Multimap::from_root(
+                rt.store(),
+                &st.cron_event_queue,
+                CRON_QUEUE_HAMT_BITWIDTH,
+                CRON_QUEUE_AMT_BITWIDTH,
+            )
+            .map_err(|e| {
+                e.downcast_default(ExitCode::ErrIllegalState, "failed to load cron events")
+            })?;
 
             st.append_cron_event(&mut events, params.event_epoch, miner_event)
                 .map_err(|e| {
@@ -249,8 +248,20 @@ impl Actor {
     {
         rt.validate_immediate_caller_is(std::iter::once(&*CRON_ACTOR_ADDR))?;
 
-        Self::process_batch_proof_verifies(rt)?;
-        Self::process_deferred_cron_events(rt)?;
+        let rewret: ThisEpochRewardReturn = rt
+            .send(
+                *REWARD_ACTOR_ADDR,
+                crate::reward::Method::ThisEpochReward as MethodNum,
+                Serialized::default(),
+                TokenAmount::zero(),
+            )
+            .map_err(|e| e.wrap("failed to check epoch baseline power"))?
+            .deserialize()?;
+
+        if let Err(e) = Self::process_batch_proof_verifies(rt, &rewret) {
+            error!("unexpected error processing batch proof verifies: {}. Skipping all verification for epoch {}", e, rt.curr_epoch());
+        }
+        Self::process_deferred_cron_events(rt, rewret.clone())?;
 
         let this_epoch_raw_byte_power = rt.transaction(|st: &mut State, _| {
             let (raw_byte_power, qa_power) = st.current_total_power();
@@ -286,6 +297,13 @@ impl Actor {
         rt.transaction(|st: &mut State, rt| {
             st.validate_miner_has_claim(rt.store(), rt.message().caller())?;
             st.add_pledge_total(pledge_delta);
+            if st.total_pledge_collateral.is_negative() {
+                return Err(actor_error!(
+                    ErrIllegalState,
+                    "negative total pledge collateral {}",
+                    st.total_pledge_collateral
+                ));
+            }
             Ok(())
         })
     }
@@ -304,14 +322,25 @@ impl Actor {
             st.validate_miner_has_claim(rt.store(), rt.message().caller())?;
 
             let mut mmap = if let Some(ref batch) = st.proof_validation_batch {
-                Multimap::from_root(rt.store(), batch).map_err(|e| {
+                Multimap::from_root(
+                    rt.store(),
+                    batch,
+                    HAMT_BIT_WIDTH,
+                    PROOF_VALIDATION_BATCH_AMT_BITWIDTH,
+                )
+                .map_err(|e| {
                     e.downcast_default(
                         ExitCode::ErrIllegalState,
                         "failed to load proof batching set",
                     )
                 })?
             } else {
-                Multimap::new(rt.store())
+                debug!("ProofValidationBatch created");
+                Multimap::new(
+                    rt.store(),
+                    HAMT_BIT_WIDTH,
+                    PROOF_VALIDATION_BATCH_AMT_BITWIDTH,
+                )
             };
             let miner_addr = rt.message().caller();
             let arr = mmap
@@ -370,7 +399,10 @@ impl Actor {
         })
     }
 
-    fn process_batch_proof_verifies<BS, RT>(rt: &mut RT) -> Result<(), ActorError>
+    fn process_batch_proof_verifies<BS, RT>(
+        rt: &mut RT,
+        rewret: &ThisEpochRewardReturn,
+    ) -> Result<(), String>
     where
         BS: BlockStore,
         RT: Runtime<BS>,
@@ -378,31 +410,58 @@ impl Actor {
         // Index map is needed here to preserve insertion order, miners must be iterated based
         // on order iterated through multimap.
         let mut verifies = IndexMap::new();
+        let mut st_err: Option<String> = None;
+        let state: State = rt.state().map_err(|e| {
+            format!(
+                "failed to load state in process batch proof verification: {}",
+                e
+            )
+        })?;
         rt.transaction(|st: &mut State, rt| {
             if st.proof_validation_batch.is_none() {
+                debug!("ProofValidationBatch was nil, quitting verification");
                 return Ok(());
             }
-            let mmap = Multimap::from_root(rt.store(), st.proof_validation_batch.as_ref().unwrap())
-                .map_err(|e| {
-                    e.downcast_default(
-                        ExitCode::ErrIllegalState,
-                        "failed to load proofs validation batch",
-                    )
-                })?;
+            let mmap = match Multimap::from_root(
+                rt.store(),
+                st.proof_validation_batch.as_ref().unwrap(),
+                HAMT_BIT_WIDTH,
+                PROOF_VALIDATION_BATCH_AMT_BITWIDTH,
+            ) {
+                Ok(mmap) => mmap,
+                Err(e) => {
+                    st_err = Some(format!("failed to load proofs validation batch {}", e));
+                    return Ok(());
+                }
+            };
 
-            let claims = make_map_with_root::<_, Claim>(&st.claims, rt.store()).map_err(|e| {
-                e.downcast_default(ExitCode::ErrIllegalState, "failed to load claims")
-            })?;
-            mmap.for_all::<_, SealVerifyInfo>(|k, arr| {
-                let addr = Address::from_bytes(&k.0).map_err(|e| {
-                    actor_error!(ErrIllegalState, "failed to parse address key: {}", e)
-                })?;
+            let claims = match make_map_with_root_and_bitwidth::<_, Claim>(
+                &st.claims,
+                rt.store(),
+                HAMT_BIT_WIDTH,
+            ) {
+                Ok(claims) => claims,
+                Err(e) => {
+                    st_err = Some(format!("failed to load claims: {}", e));
+                    return Ok(());
+                }
+            };
 
-                let contains_claim = claims.contains_key(&addr.to_bytes()).map_err(|e| {
-                    e.downcast_default(ExitCode::ErrIllegalState, "failed to look up claim")
-                })?;
+            if let Err(e) = mmap.for_all::<_, SealVerifyInfo>(|k, arr| {
+                let addr = match Address::from_bytes(&k.0) {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        return Err(format!("failed to parse address key: {}", e).into());
+                    }
+                };
+
+                let contains_claim = match claims.contains_key(&addr.to_bytes()) {
+                    Ok(contains_claim) => contains_claim,
+                    Err(e) => return Err(format!("failed to look up claim: {}", e).into()),
+                };
+
                 if !contains_claim {
-                    log::debug!("skipping batch verifies for unknown miner: {}", addr);
+                    debug!("skipping batch verifies for unknown miner: {}", addr);
                     return Ok(());
                 }
 
@@ -412,35 +471,43 @@ impl Actor {
                     Ok(())
                 })
                 .map_err(|e| {
-                    e.downcast_default(
-                        ExitCode::ErrIllegalState,
-                        format!(
-                            "failed to iterate over proof verify array for miner {}",
-                            addr
-                        ),
+                    format!(
+                        "failed to iterate over proof verify array for miner {}: {}",
+                        addr, e
                     )
                 })?;
 
                 verifies.insert(addr, infos);
                 Ok(())
-            })
-            .map_err(|e| {
-                e.downcast_default(ExitCode::ErrIllegalState, "failed to iterate proof batch")
-            })?;
+            }) {
+                // Do not return immediately, all runs that get this far should wipe the ProofValidationBatchQueue.
+                // If we leave the validation batch then in the case of a repeating state error the queue
+                // will quickly fill up and repeated traversals will start ballooning cron execution time.
+                st_err = Some(format!("failed to iterate proof batch: {}", e));
+            }
 
             st.proof_validation_batch = None;
             Ok(())
+        })
+        .map_err(|e| {
+            format!(
+                "failed to do transaction in process batch proof verifies: {}",
+                e
+            )
         })?;
+        if let Some(st_err) = st_err {
+            return Err(st_err);
+        }
 
         // TODO if verifies is ever Rayon compatible, this won't be needed
         let verif_arr: Vec<(&Address, &Vec<SealVerifyInfo>)> = verifies.iter().collect();
         let res = rt
             .batch_verify_seals(verif_arr.as_slice())
-            .map_err(|e| e.downcast_default(ExitCode::ErrIllegalState, "failed to batch verify"))?;
+            .map_err(|e| format!("failed to batch verify: {}", e))?;
 
         for (m, verifs) in verifies.iter() {
             let vres = res.get(m).ok_or_else(
-                || actor_error!(ErrNotFound; "batch verify seals syscall implemented incorrectly"),
+                || format!("batch verify seals syscall implemented incorrectly, result not found for miner: {}", m)
             )?;
 
             let mut seen = AHashSet::<_>::new();
@@ -449,6 +516,7 @@ impl Actor {
                 if r {
                     let snum = verifs[i].sector_id.number;
                     if seen.contains(&snum) {
+                        info!("skipped over a duplicate proof");
                         continue;
                     }
                     seen.insert(snum);
@@ -456,34 +524,56 @@ impl Actor {
                 }
             }
             // Result intentionally ignored
-            let _ = rt.send(
-                *m,
-                miner::Method::ConfirmSectorProofsValid as MethodNum,
-                Serialized::serialize(&miner::ConfirmSectorProofsParams {
-                    sectors: successful,
-                })?,
-                Default::default(),
-            );
+            if !successful.is_empty() {
+                if let Err(e) = rt.send(
+                    *m,
+                    miner::Method::ConfirmSectorProofsValid as MethodNum,
+                    Serialized::serialize(&miner::ConfirmSectorProofsParams {
+                        sectors: successful,
+                        reward_smoothed: rewret.this_epoch_reward_smoothed.clone(),
+                        reward_baseline_power: rewret.this_epoch_baseline_power.clone(),
+                        quality_adj_power_smoothed: state.this_epoch_qa_power_smoothed.clone(),
+                    })
+                    .map_err(|e| format!("failed to serialize ConfirmSectorProofsParams: {}", e))?,
+                    Default::default(),
+                ) {
+                    error!(
+                        "failed to confirm sector proof validity to {}, error code {}",
+                        m, e
+                    );
+                }
+            }
         }
         Ok(())
     }
 
-    fn process_deferred_cron_events<BS, RT>(rt: &mut RT) -> Result<(), ActorError>
+    fn process_deferred_cron_events<BS, RT>(
+        rt: &mut RT,
+        rewret: ThisEpochRewardReturn,
+    ) -> Result<(), ActorError>
     where
         BS: BlockStore,
         RT: Runtime<BS>,
     {
         let rt_epoch = rt.curr_epoch();
         let mut cron_events = Vec::new();
+        let st: State = rt.state()?;
         rt.transaction(|st: &mut State, rt| {
-            let mut events =
-                Multimap::from_root(rt.store(), &st.cron_event_queue).map_err(|e| {
-                    e.downcast_default(ExitCode::ErrIllegalState, "failed to load cron events")
-                })?;
-
-            let claims = make_map_with_root::<_, Claim>(&st.claims, rt.store()).map_err(|e| {
-                e.downcast_default(ExitCode::ErrIllegalState, "failed to load claims")
+            let mut events = Multimap::from_root(
+                rt.store(),
+                &st.cron_event_queue,
+                CRON_QUEUE_HAMT_BITWIDTH,
+                CRON_QUEUE_AMT_BITWIDTH,
+            )
+            .map_err(|e| {
+                e.downcast_default(ExitCode::ErrIllegalState, "failed to load cron events")
             })?;
+
+            let claims =
+                make_map_with_root_and_bitwidth::<_, Claim>(&st.claims, rt.store(), HAMT_BIT_WIDTH)
+                    .map_err(|e| {
+                        e.downcast_default(ExitCode::ErrIllegalState, "failed to load claims")
+                    })?;
             for epoch in st.first_cron_epoch..=rt_epoch {
                 let epoch_events = load_cron_events(&events, epoch).map_err(|e| {
                     e.downcast_default(
@@ -507,7 +597,7 @@ impl Actor {
                                 )
                             })?;
                     if !miner_has_claim {
-                        log::debug!("skipping cron event for unknown miner: {}", evt.miner_addr);
+                        debug!("skipping cron event for unknown miner: {}", evt.miner_addr);
                         continue;
                     }
                     cron_events.push(evt);
@@ -531,10 +621,15 @@ impl Actor {
 
         let mut failed_miner_crons = Vec::new();
         for event in cron_events {
+            let params = Serialized::serialize(DeferredCronEventParams {
+                event_payload: event.callback_payload.bytes().to_owned(),
+                reward_smoothed: rewret.this_epoch_reward_smoothed.clone(),
+                quality_adj_power_smoothed: st.this_epoch_qa_power_smoothed.clone(),
+            })?;
             let res = rt.send(
                 event.miner_addr,
                 miner::Method::OnDeferredCronEvent as MethodNum,
-                event.callback_payload,
+                params,
                 Default::default(),
             );
             // If a callback fails, this actor continues to invoke other callbacks
@@ -542,10 +637,9 @@ impl Actor {
             // Failures are unexpected here but will result in removal of miner power
             // A log message would really help here.
             if let Err(e) = res {
-                log::debug!(
+                error!(
                     "OnDeferredCronEvent failed for miner {}: res {}",
-                    event.miner_addr,
-                    e
+                    event.miner_addr, e
                 );
                 failed_miner_crons.push(event.miner_addr)
             }
@@ -553,26 +647,25 @@ impl Actor {
 
         if !failed_miner_crons.is_empty() {
             rt.transaction(|st: &mut State, rt| {
-                let mut claims = make_map_with_root(&st.claims, rt.store()).map_err(|e| {
-                    e.downcast_default(ExitCode::ErrIllegalState, "failed to load claims")
-                })?;
+                let mut claims =
+                    make_map_with_root_and_bitwidth(&st.claims, rt.store(), HAMT_BIT_WIDTH)
+                        .map_err(|e| {
+                            e.downcast_default(ExitCode::ErrIllegalState, "failed to load claims")
+                        })?;
 
                 // Remove power and leave miner frozen
                 for miner_addr in failed_miner_crons {
                     if let Err(e) = st.delete_claim(&mut claims, &miner_addr) {
-                        log::error!(
+                        error!(
                             "failed to delete claim for miner {} after\
                             failing on deferred cron event: {}",
-                            miner_addr,
-                            e
+                            miner_addr, e
                         );
                         continue;
                     }
 
-                    // On version 7, decrement miner count to keep stats consistent.
-                    if rt.network_version() >= NetworkVersion::V7 {
-                        st.miner_count -= 1;
-                    }
+                    // Decrement miner count to keep stats consistent.
+                    st.miner_count -= 1;
                 }
 
                 st.claims = claims.flush().map_err(|e| {
@@ -597,7 +690,6 @@ impl ActorCode for Actor {
     {
         match FromPrimitive::from_u64(method) {
             Some(Method::Constructor) => {
-                check_empty_params(params)?;
                 Self::constructor(rt)?;
                 Ok(Serialized::default())
             }
@@ -614,7 +706,6 @@ impl ActorCode for Actor {
                 Ok(Serialized::default())
             }
             Some(Method::OnEpochTickEnd) => {
-                check_empty_params(params)?;
                 Self::on_epoch_tick_end(rt)?;
                 Ok(Serialized::default())
             }
@@ -628,7 +719,6 @@ impl ActorCode for Actor {
                 Ok(Serialized::default())
             }
             Some(Method::CurrentTotalPower) => {
-                check_empty_params(params)?;
                 let res = Self::current_total_power(rt)?;
                 Ok(Serialized::serialize(res)?)
             }

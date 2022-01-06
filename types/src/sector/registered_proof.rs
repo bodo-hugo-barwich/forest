@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::SectorSize;
@@ -8,6 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(feature = "proofs")]
 use std::convert::TryFrom;
 
+/// Seal proof type which defines the version and sector size.
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
 pub enum RegisteredSealProof {
     StackedDRG2KiBV1,
@@ -46,6 +47,7 @@ impl RegisteredSealProof {
         }
     }
 
+    /// Convert the original proof type to the v1 proof added in network version 7.
     pub fn update_to_v1(&mut self) {
         *self = match self {
             Self::StackedDRG2KiBV1 => Self::StackedDRG2KiBV1P1,
@@ -64,8 +66,23 @@ impl RegisteredSealProof {
         let epochs_per_year = 1_262_277;
         5 * epochs_per_year
     }
+
+    /// Proof size for each SealProof type
+    pub fn proof_size(self) -> Result<usize, String> {
+        use RegisteredSealProof::*;
+        match self {
+            StackedDRG2KiBV1 | StackedDRG512MiBV1 | StackedDRG8MiBV1 | StackedDRG2KiBV1P1
+            | StackedDRG512MiBV1P1 | StackedDRG8MiBV1P1 => Ok(192),
+
+            StackedDRG32GiBV1 | StackedDRG64GiBV1 | StackedDRG32GiBV1P1 | StackedDRG64GiBV1P1 => {
+                Ok(1920)
+            }
+            Invalid(i) => Err(format!("unsupported proof type: {}", i)),
+        }
+    }
 }
 
+/// Proof of spacetime type, indicating version and sector size of the proof.
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
 pub enum RegisteredPoStProof {
     StackedDRGWinning2KiBV1,
@@ -115,6 +132,38 @@ impl RegisteredPoStProof {
             StackedDRGWindow512MiBV1 | StackedDRGWinning512MiBV1 => {
                 Ok(RegisteredSealProof::StackedDRG512MiBV1)
             }
+            Invalid(i) => Err(format!("unsupported proof type: {}", i)),
+        }
+    }
+
+    /// Proof size for each PoStProof type
+    pub fn proof_size(self) -> Result<usize, String> {
+        use RegisteredPoStProof::*;
+        match self {
+            StackedDRGWinning2KiBV1
+            | StackedDRGWinning8MiBV1
+            | StackedDRGWinning512MiBV1
+            | StackedDRGWinning32GiBV1
+            | StackedDRGWinning64GiBV1
+            | StackedDRGWindow2KiBV1
+            | StackedDRGWindow8MiBV1
+            | StackedDRGWindow512MiBV1
+            | StackedDRGWindow32GiBV1
+            | StackedDRGWindow64GiBV1 => Ok(192),
+            Invalid(i) => Err(format!("unsupported proof type: {}", i)),
+        }
+    }
+    /// Returns the partition size, in sectors, associated with a proof type.
+    /// The partition size is the number of sectors proven in a single PoSt proof.
+    pub fn window_post_partitions_sector(self) -> Result<u64, String> {
+        // Resolve to post proof and then compute size from that.
+        use RegisteredPoStProof::*;
+        match self {
+            StackedDRGWinning64GiBV1 | StackedDRGWindow64GiBV1 => Ok(2300),
+            StackedDRGWinning32GiBV1 | StackedDRGWindow32GiBV1 => Ok(2349),
+            StackedDRGWinning2KiBV1 | StackedDRGWindow2KiBV1 => Ok(2),
+            StackedDRGWinning8MiBV1 | StackedDRGWindow8MiBV1 => Ok(2),
+            StackedDRGWinning512MiBV1 | StackedDRGWindow512MiBV1 => Ok(2),
             Invalid(i) => Err(format!("unsupported proof type: {}", i)),
         }
     }
@@ -184,6 +233,13 @@ impl RegisteredSealProof {
     }
 }
 
+/// Seal proof type which defines the version and sector size.
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
+pub enum RegisteredAggregateProof {
+    SnarkPackV1,
+    Invalid(i64),
+}
+
 macro_rules! i64_conversion {
     ($ty:ident; $( $var:ident => $val:expr, )*) => {
         impl From<i64> for $ty {
@@ -232,6 +288,22 @@ i64_conversion! {
     StackedDRG512MiBV1P1 => 7,
     StackedDRG32GiBV1P1 => 8,
     StackedDRG64GiBV1P1 => 9,
+}
+
+i64_conversion! {
+    RegisteredAggregateProof;
+    SnarkPackV1 => 0,
+}
+#[cfg(feature = "proofs")]
+impl TryFrom<RegisteredAggregateProof> for filecoin_proofs_api::RegisteredAggregationProof {
+    type Error = String;
+    fn try_from(p: RegisteredAggregateProof) -> Result<Self, Self::Error> {
+        use RegisteredAggregateProof::*;
+        match p {
+            SnarkPackV1 => Ok(Self::SnarkPackV1),
+            Invalid(i) => Err(format!("unsupported aggregate proof type: {}", i)),
+        }
+    }
 }
 
 #[cfg(feature = "proofs")]
@@ -305,6 +377,25 @@ impl Serialize for RegisteredSealProof {
 }
 
 impl<'de> Deserialize<'de> for RegisteredSealProof {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let val = i64::deserialize(deserializer)?;
+        Ok(Self::from(val))
+    }
+}
+
+impl Serialize for RegisteredAggregateProof {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        i64::from(*self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RegisteredAggregateProof {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,

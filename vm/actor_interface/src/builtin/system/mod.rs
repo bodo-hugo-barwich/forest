@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use ipld_blockstore::BlockStore;
@@ -7,10 +7,10 @@ use std::error::Error;
 use vm::ActorState;
 
 /// System actor address.
-pub static ADDRESS: &actorv2::SYSTEM_ACTOR_ADDR = &actorv2::SYSTEM_ACTOR_ADDR;
+pub static ADDRESS: &actorv3::SYSTEM_ACTOR_ADDR = &actorv3::SYSTEM_ACTOR_ADDR;
 
 /// System actor method.
-pub type Method = actorv2::system::Method;
+pub type Method = actorv3::system::Method;
 
 /// System actor state.
 #[derive(Serialize)]
@@ -18,6 +18,10 @@ pub type Method = actorv2::system::Method;
 pub enum State {
     V0(actorv0::system::State),
     V2(actorv2::system::State),
+    V3(actorv3::system::State),
+    V4(actorv4::system::State),
+    V5(actorv5::system::State),
+    V6(actorv6::system::State),
 }
 
 impl State {
@@ -34,6 +38,26 @@ impl State {
             Ok(store
                 .get(&actor.state)?
                 .map(State::V2)
+                .ok_or("Actor state doesn't exist in store")?)
+        } else if actor.code == *actorv3::SYSTEM_ACTOR_CODE_ID {
+            Ok(store
+                .get(&actor.state)?
+                .map(State::V3)
+                .ok_or("Actor state doesn't exist in store")?)
+        } else if actor.code == *actorv4::SYSTEM_ACTOR_CODE_ID {
+            Ok(store
+                .get(&actor.state)?
+                .map(State::V4)
+                .ok_or("Actor state doesn't exist in store")?)
+        } else if actor.code == *actorv5::SYSTEM_ACTOR_CODE_ID {
+            Ok(store
+                .get(&actor.state)?
+                .map(State::V5)
+                .ok_or("Actor state doesn't exist in store")?)
+        } else if actor.code == *actorv6::SYSTEM_ACTOR_CODE_ID {
+            Ok(store
+                .get(&actor.state)?
+                .map(State::V6)
                 .ok_or("Actor state doesn't exist in store")?)
         } else {
             Err(format!("Unknown actor code {}", actor.code).into())

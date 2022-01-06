@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::{drand::DRAND_MAINNET, DrandPoint};
@@ -30,9 +30,21 @@ pub const UPGRADE_PERSIAN_HEIGHT: ChainEpoch = 150;
 pub const UPGRADE_ORANGE_HEIGHT: ChainEpoch = 180;
 /// Remove burn on window PoSt fork
 pub const UPGRADE_CLAUS_HEIGHT: ChainEpoch = 210;
+/// V10 network upgrade height TBD
+pub const UPGRADE_ACTORS_V3_HEIGHT: ChainEpoch = 999999998;
+/// V11 network upgrade
+pub const UPGRADE_NORWEGIAN_HEIGHT: ChainEpoch = 999999999;
+/// V12 network upgrade TODO
+pub const UPGRADE_ACTORS_V4_HEIGHT: ChainEpoch = 999999999;
+/// V13 network upgrade TODO
+pub const UPGRADE_HYPERDRIVE_HEIGHT: ChainEpoch = 999999999;
+/// V14 network update TODO
+pub const UPGRADE_ACTORS_V6_HEIGHT: ChainEpoch = 999999999;
+
+pub const UPGRADE_PLACEHOLDER_HEIGHT: ChainEpoch = 9999999;
 
 /// Current network version for the network
-pub const NEWEST_NETWORK_VERSION: NetworkVersion = NetworkVersion::V9;
+pub const NEWEST_NETWORK_VERSION: NetworkVersion = NetworkVersion::V14;
 
 /// Bootstrap peer ids
 pub const DEFAULT_BOOTSTRAP: &[&str] = &[
@@ -47,4 +59,5 @@ lazy_static! {
     },];
 }
 
+/// Time, in seconds, between each block.
 pub const BLOCK_DELAY_SECS: u64 = EPOCH_DURATION_SECONDS as u64;

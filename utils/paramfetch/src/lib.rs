@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use async_std::{
@@ -129,15 +129,14 @@ async fn fetch_verify_params(
     info: Arc<ParameterData>,
     mb: Option<Arc<MultiBar<Stdout>>>,
 ) -> Result<(), Box<dyn StdError>> {
-    let mut path: PathBuf = param_dir().into();
-    path.push(name);
+    let path: PathBuf = [&param_dir(), name].iter().collect();
     let path: Arc<Path> = Arc::from(path.as_path());
 
     match check_file(path.clone(), info.clone()).await {
         Ok(()) => return Ok(()),
         Err(e) => {
             if e.kind() != ErrorKind::NotFound {
-                warn!("{}", e)
+                warn!("Error checking file: {}", e);
             }
         }
     }

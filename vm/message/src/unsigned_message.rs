@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::Message;
@@ -158,15 +158,15 @@ impl<'de> Deserialize<'de> for UnsignedMessage {
         ) = Deserialize::deserialize(deserializer)?;
         Ok(Self {
             version,
-            to,
             from,
+            to,
             sequence,
             value,
+            method_num,
+            params,
             gas_limit,
             gas_fee_cap,
             gas_premium,
-            method_num,
-            params,
         })
     }
 }

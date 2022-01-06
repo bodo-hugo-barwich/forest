@@ -1,11 +1,12 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use async_std::sync::RwLock;
 use cid::Cid;
 use lru::LruCache;
 
-/// Threadsafe cache for tracking bad blocks
+/// Threadsafe cache for tracking bad blocks.
+/// This cache is checked before validating a block, to ensure no duplicate work.
 #[derive(Debug)]
 pub struct BadBlockCache {
     cache: RwLock<LruCache<Cid, String>>,

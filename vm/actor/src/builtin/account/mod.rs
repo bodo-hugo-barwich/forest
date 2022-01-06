@@ -1,10 +1,10 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 mod state;
 
 pub use self::state::State;
-use crate::{builtin::singletons::SYSTEM_ACTOR_ADDR, check_empty_params};
+use crate::builtin::singletons::SYSTEM_ACTOR_ADDR;
 use address::{Address, Protocol};
 use ipld_blockstore::BlockStore;
 use num_derive::FromPrimitive;
@@ -12,7 +12,7 @@ use num_traits::FromPrimitive;
 use runtime::{ActorCode, Runtime};
 use vm::{actor_error, ActorError, ExitCode, MethodNum, Serialized, METHOD_CONSTRUCTOR};
 
-// * Updated to specs-actors commit: e195950ba98adb8ce362030356bf4a3809b7ec77 (v2.3.2)
+// * Updated to specs-actors commit: 845089a6d2580e46055c24415a6c32ee688e5186 (v3.0.0)
 
 /// Account actor methods available
 #[derive(FromPrimitive)]
@@ -71,7 +71,6 @@ impl ActorCode for Actor {
                 Ok(Serialized::default())
             }
             Some(Method::PubkeyAddress) => {
-                check_empty_params(params)?;
                 let addr = Self::pubkey_address(rt)?;
                 Ok(Serialized::serialize(addr)?)
             }

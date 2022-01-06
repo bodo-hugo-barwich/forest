@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 mod errors;
@@ -14,6 +14,7 @@ use data_encoding::Encoding;
 #[allow(unused_imports)]
 use data_encoding_macro::{internal_new_encoding, new_encoding};
 use encoding::{blake2b_variable, serde_bytes, Cbor};
+use once_cell::sync::OnceCell;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::hash::Hash;
 use std::str::FromStr;
@@ -34,6 +35,17 @@ pub const SECP_PUB_LEN: usize = 65;
 /// BLS public key length used for validation of BLS addresses.
 pub const BLS_PUB_LEN: usize = 48;
 
+lazy_static::lazy_static! {
+    static ref BLS_ZERO_ADDR_BYTES: BLSPublicKey = {
+        let bz_addr = Address::from_str("f3yaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaby2smx7a");
+        if let Ok(Address {payload: Payload::BLS(pubkey), ..}) = bz_addr {
+            pubkey
+        } else {
+            panic!("failed to parse BLS address from provided BLS_ZERO_ADDR string")
+        }
+    };
+}
+
 /// Length of the checksum hash for string encodings.
 pub const CHECKSUM_HASH_LEN: usize = 4;
 
@@ -45,7 +57,7 @@ const TESTNET_PREFIX: &str = "t";
 const UNDEF_ADDR_STRING: &str = "<empty>";
 
 // TODO pull network from config (probably)
-const NETWORK_DEFAULT: Network = Network::Mainnet;
+pub static NETWORK_DEFAULT: OnceCell<Network> = OnceCell::new();
 
 /// Address is the struct that defines the protocol and data payload conversion from either
 /// a public key or value
@@ -70,14 +82,18 @@ impl Address {
             Err(Error::InvalidLength)
         } else {
             let protocol = Protocol::from_byte(bz[0]).ok_or(Error::UnknownProtocol)?;
-            Self::new(NETWORK_DEFAULT, protocol, &bz[1..])
+            Self::new(
+                *NETWORK_DEFAULT.get_or_init(|| Network::Mainnet),
+                protocol,
+                &bz[1..],
+            )
         }
     }
 
     /// Generates new address using ID protocol
     pub fn new_id(id: u64) -> Self {
         Self {
-            network: NETWORK_DEFAULT,
+            network: *NETWORK_DEFAULT.get_or_init(|| Network::Mainnet),
             payload: Payload::ID(id),
         }
     }
@@ -88,7 +104,7 @@ impl Address {
             return Err(Error::InvalidSECPLength(pubkey.len()));
         }
         Ok(Self {
-            network: NETWORK_DEFAULT,
+            network: *NETWORK_DEFAULT.get_or_init(|| Network::Mainnet),
             payload: Payload::Secp256k1(address_hash(pubkey)),
         })
     }
@@ -96,7 +112,7 @@ impl Address {
     /// Generates new address using the Actor protocol
     pub fn new_actor(data: &[u8]) -> Self {
         Self {
-            network: NETWORK_DEFAULT,
+            network: *NETWORK_DEFAULT.get_or_init(|| Network::Mainnet),
             payload: Payload::Actor(address_hash(data)),
         }
     }
@@ -109,9 +125,16 @@ impl Address {
         let mut key = [0u8; BLS_PUB_LEN];
         key.copy_from_slice(pubkey);
         Ok(Self {
-            network: NETWORK_DEFAULT,
+            network: *NETWORK_DEFAULT.get_or_init(|| Network::Mainnet),
             payload: Payload::BLS(key.into()),
         })
+    }
+
+    pub fn is_bls_zero_address(&self) -> bool {
+        match self.payload {
+            Payload::BLS(payload_bytes) => payload_bytes == *BLS_ZERO_ADDR_BYTES,
+            _ => false,
+        }
     }
 
     /// Returns protocol for Address
@@ -148,7 +171,7 @@ impl Address {
     }
 
     /// Returns encoded bytes of Address
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(self) -> Vec<u8> {
         self.payload.to_bytes()
     }
 
@@ -295,10 +318,67 @@ pub(crate) fn to_leb_bytes(id: u64) -> Result<Vec<u8>, Error> {
 }
 
 pub(crate) fn from_leb_bytes(bz: &[u8]) -> Result<u64, Error> {
-    let mut readable = &bz[..];
+    let mut readable = bz;
 
     // write id to buffer in leb128 format
-    Ok(leb128::read::unsigned(&mut readable)?)
+    let id = leb128::read::unsigned(&mut readable)?;
+
+    if to_leb_bytes(id)? == bz {
+        Ok(id)
+    } else {
+        Err(Error::InvalidAddressIDPayload(bz.to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Test cases for FOR-02: https://github.com/ChainSafe/forest/issues/1134
+    use crate::{errors::Error, from_leb_bytes, to_leb_bytes};
+
+    #[test]
+    fn test_from_leb_bytes_passing() {
+        let passing = vec![67];
+        assert_eq!(
+            to_leb_bytes(from_leb_bytes(&passing).unwrap()),
+            Ok(vec![67])
+        );
+    }
+
+    #[test]
+    fn test_from_leb_bytes_extra_bytes() {
+        let extra_bytes = vec![67, 0, 1, 2];
+
+        match from_leb_bytes(&extra_bytes) {
+            Ok(id) => {
+                println!(
+                    "Successfully decoded bytes when it was not supposed to. Result was: {:?}",
+                    &to_leb_bytes(id).unwrap()
+                );
+                panic!();
+            }
+            Err(e) => {
+                assert_eq!(e, Error::InvalidAddressIDPayload(extra_bytes));
+            }
+        }
+    }
+
+    #[test]
+    fn test_from_leb_bytes_minimal_encoding() {
+        let minimal_encoding = vec![67, 0, 130, 0];
+
+        match from_leb_bytes(&minimal_encoding) {
+            Ok(id) => {
+                println!(
+                    "Successfully decoded bytes when it was not supposed to. Result was: {:?}",
+                    &to_leb_bytes(id).unwrap()
+                );
+                panic!();
+            }
+            Err(e) => {
+                assert_eq!(e, Error::InvalidAddressIDPayload(minimal_encoding));
+            }
+        }
+    }
 }
 
 /// Checksum calculates the 4 byte checksum hash
@@ -360,7 +440,7 @@ pub mod json {
         D: Deserializer<'de>,
     {
         let address_as_string: Cow<'de, str> = Deserialize::deserialize(deserializer)?;
-        Ok(Address::from_str(&address_as_string).map_err(de::Error::custom)?)
+        Address::from_str(&address_as_string).map_err(de::Error::custom)
     }
 
     #[cfg(feature = "json")]

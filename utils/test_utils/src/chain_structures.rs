@@ -1,15 +1,13 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 #![cfg(feature = "test_constructors")]
 
 use address::Address;
-use blocks::{
-    Block, BlockHeader, EPostProof, EPostTicket, FullTipset, Ticket, Tipset, TipsetKeys, TxMeta,
-};
+use blocks::{Block, BlockHeader, FullTipset, Ticket, Tipset, TipsetKeys, TxMeta};
 use cid::{Cid, Code::Blake2b256};
 use crypto::{Signature, Signer, VRFProof};
-use encoding::{from_slice, to_vec};
+use encoding::to_vec;
 use forest_libp2p::chain_exchange::{
     ChainExchangeResponse, ChainExchangeResponseStatus, CompactedMessages, TipsetBundle,
 };
@@ -91,21 +89,6 @@ pub fn construct_ticket() -> Ticket {
     Ticket::new(vrf_result)
 }
 
-/// Returns a deterministic EPostProof to be used for testing
-pub fn construct_epost_proof() -> EPostProof {
-    let etik = EPostTicket {
-        partial: base64::decode("TFliU6/pdbjRyomejlXMS77qjYdMDty07vigvXH/vjI=").unwrap(),
-        sector_id: 284,
-        challenge_index: 5,
-    };
-
-    EPostProof{
-        proof: from_slice(&base64::decode("rn85uiodD29xvgIuvN5/g37IXghPtVtl3li9y+nPHCueATI1q1/oOn0FEIDXRWHLpZ4CzAqOdQh9rdHih+BI5IsdI1YpwV+UdNDspJVW/cinVE+ZoiO86ap30l77RLkrEwxUZ5v8apsSRUizoXh1IFrHgK06gk1wl5LaxY2i/CQgBoWIPx9o2EYMBbNfQcu+pRzFmiDjzT6BIhYrPbo+gm6wHFiNhp3FvAuSUH2/N+5MKZo7Eh7LwgGLc0fL4MEI").unwrap()).unwrap(),
-        post_rand: base64::decode("hdodcCz5kLJYRb9PT7m4z9kRvc9h02KMye9DOklnQ8v05X2ds9rgNhcTV+d/cXS+AvADHpepQODMV/6E1kbT99kdFt0xMNUsO/9YbH4ujif7sY0P8pgRAunlMgPrx7Sx").unwrap(),
-        candidates: vec![etik]
-    }
-}
-
 /// Returns a full block used for testing
 pub fn construct_block() -> Block {
     const EPOCH: i64 = 1;
@@ -167,7 +150,7 @@ pub fn construct_messages() -> (UnsignedMessage, SignedMessage) {
 pub fn construct_tipset_bundle(epoch: i64, weight: u64) -> TipsetBundle {
     let headers = construct_headers(epoch, weight);
     let (bls, secp) = construct_messages();
-    let includes: Vec<Vec<u64>> = (0..headers.len()).map(|_| vec![]).collect();
+    let includes: Vec<Vec<u64>> = (0..headers.len()).map(|_| Vec::new()).collect();
 
     TipsetBundle {
         blocks: headers,

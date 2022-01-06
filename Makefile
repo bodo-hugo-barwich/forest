@@ -46,7 +46,7 @@ clean:
 
 lint: license clean
 	cargo fmt --all
-	cargo clippy --all-features -- -D warnings
+	cargo clippy -- -D warnings -A clippy::upper_case_acronyms
 
 build:
 	cargo build --bin forest
@@ -55,7 +55,10 @@ release:
 	cargo build --release --bin forest
 
 interopnet:
-	cargo build --release --manifest-path=forest/Cargo.toml --features "interopnet"
+	cargo build --release --manifest-path=forest/Cargo.toml --no-default-features --features "rocksdb, interopnet"
+
+devnet:
+	cargo build  --manifest-path=forest/Cargo.toml --no-default-features --features "devnet, rocksdb"
 
 docker-run:
 	docker build -t forest:latest -f ./Dockerfile . && docker run forest
@@ -76,10 +79,21 @@ test-vectors: pull-serialization-tests run-vectors
 
 # Test all without the submodule test vectors with release configuration
 test:
-	cargo test --all --all-features --exclude serialization_tests --exclude conformance_tests
+	cargo test --all --exclude serialization_tests --exclude conformance_tests --exclude forest_message --exclude forest_crypto
+	cargo test -p forest_crypto --features blst --no-default-features
+	cargo test -p forest_crypto --features pairing --no-default-features
+	cargo test -p forest_message --features blst --no-default-features
+	cargo test -p forest_message --features pairing --no-default-features
 
 test-release:
-	cargo test --release --all --all-features --exclude serialization_tests --exclude conformance_tests
+	cargo test --release --all --exclude serialization_tests --exclude conformance_tests --exclude forest_message --exclude forest_crypto
+	cargo test --release -p forest_crypto --features blst --no-default-features
+	cargo test --release -p forest_crypto --features pairing --no-default-features
+	cargo test --release -p forest_message --features blst --no-default-features
+	cargo test --release -p forest_message --features pairing --no-default-features
+
+smoke-test:
+	./scripts/smoke_test.sh
 
 test-all: test-release run-vectors
 
@@ -88,6 +102,12 @@ license:
 	./scripts/add_license.sh
 
 docs:
-	cargo doc --no-deps --all-features
+	cargo doc --no-deps
+
+mdbook:
+	mdbook serve documentation
+
+mdbook-build:
+	mdbook build ./documentation
 
 .PHONY: clean clean-all lint build release test test-all test-release license test-vectors run-vectors pull-serialization-tests install docs run-serialization-vectors run-conformance-vectors

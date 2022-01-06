@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::{VestSpec, REWARD_VESTING_SPEC};
@@ -9,10 +9,10 @@ use crate::{
     TokenAmount, EXPECTED_LEADERS_PER_EPOCH,
 };
 use clock::ChainEpoch;
-use fil_types::{NetworkVersion, StoragePower};
-use num_bigint::{BigInt, Integer};
+use fil_types::{StoragePower, FILECOIN_PRECISION};
+use num_bigint::{num_integer::div_floor, BigInt, Integer};
 use num_traits::Zero;
-use std::cmp;
+use std::cmp::{self, max};
 
 /// Projection period of expected sector block reward for deposit required to pre-commit a sector.
 /// This deposit is lost if the pre-commitment is not timely followed up by a commitment proof.
@@ -43,7 +43,18 @@ lazy_static! {
     /// This does not divide evenly, so the result is fractionally smaller.
     static ref INITIAL_PLEDGE_MAX_PER_BYTE: BigInt =
         BigInt::from(10_u64.pow(18) / (32 << 30));
+
+    /// Base reward for successfully disputing a window posts proofs.
+    pub static ref BASE_REWARD_FOR_DISPUTED_WINDOW_POST: BigInt =
+        BigInt::from(4 * FILECOIN_PRECISION);
+
+    /// Base penalty for a successful disputed window post proof.
+    pub static ref BASE_PENALTY_FOR_DISPUTED_WINDOW_POST: BigInt =
+        BigInt::from(FILECOIN_PRECISION) * 20;
 }
+// FF + 2BR
+const INVALID_WINDOW_POST_PROJECTION_PERIOD: ChainEpoch =
+    CONTINUED_FAULT_PROJECTION_PERIOD + 2 * EPOCHS_IN_DAY;
 
 // Projection period of expected daily sector block reward penalised when a fault is continued after initial detection.
 // This guarantees that a miner pays back at least the expected block reward earned since the last successful PoSt.
@@ -89,6 +100,36 @@ pub fn expected_reward_for_power(
     let br128 = qa_sector_power * expected_reward_for_proving_period; // Q.0 * Q.128 => Q.128
     std::cmp::max(br128 >> PRECISION, Default::default())
 }
+
+// BR but zero values are clamped at 1 attofil
+// Some uses of BR (PCD, IP) require a strictly positive value for BR derived values so
+// accounting variables can be used as succinct indicators of miner activity.
+fn expected_reward_for_power_clamped_at_atto_fil(
+    reward_estimate: &FilterEstimate,
+    network_qa_power_estimate: &FilterEstimate,
+    qa_sector_power: &StoragePower,
+    projection_duration: ChainEpoch,
+) -> TokenAmount {
+    let br = expected_reward_for_power(
+        reward_estimate,
+        network_qa_power_estimate,
+        qa_sector_power,
+        projection_duration,
+    );
+    if br.le(&TokenAmount::from(0)) {
+        1.into()
+    } else {
+        br
+    }
+}
+
+// func ExpectedRewardForPowerClampedAtAttoFIL(rewardEstimate, networkQAPowerEstimate smoothing.FilterEstimate, qaSectorPower abi.StoragePower, projectionDuration abi.ChainEpoch) abi.TokenAmount {
+// 	br := ExpectedRewardForPower(rewardEstimate, networkQAPowerEstimate, qaSectorPower, projectionDuration)
+// 	if br.LessThanEqual(big.Zero()) {
+// 		br = abi.NewTokenAmount(1)
+// 	}
+// 	return br
+// }
 
 /// The penalty for a sector continuing faulty for another proving period.
 /// It is a projection of the expected reward earned by the sector.
@@ -159,6 +200,20 @@ pub fn pledge_penalty_for_termination(
     )
 }
 
+// The penalty for optimistically proving a sector with an invalid window PoSt.
+pub fn pledge_penalty_for_invalid_windowpost(
+    reward_estimate: &FilterEstimate,
+    network_qa_power_estimate: &FilterEstimate,
+    qa_sector_power: &StoragePower,
+) -> TokenAmount {
+    expected_reward_for_power(
+        reward_estimate,
+        network_qa_power_estimate,
+        qa_sector_power,
+        INVALID_WINDOW_POST_PROJECTION_PERIOD,
+    ) + &*BASE_PENALTY_FOR_DISPUTED_WINDOW_POST
+}
+
 /// Computes the PreCommit deposit given sector qa weight and current network conditions.
 /// PreCommit Deposit = BR(PreCommitDepositProjectionPeriod)
 pub fn pre_commit_deposit_for_power(
@@ -166,7 +221,7 @@ pub fn pre_commit_deposit_for_power(
     network_qa_power_estimate: &FilterEstimate,
     qa_sector_power: &StoragePower,
 ) -> TokenAmount {
-    expected_reward_for_power(
+    expected_reward_for_power_clamped_at_atto_fil(
         reward_estimate,
         network_qa_power_estimate,
         qa_sector_power,
@@ -192,7 +247,7 @@ pub fn initial_pledge_for_power(
     network_qa_power_estimate: &FilterEstimate,
     circulating_supply: &TokenAmount,
 ) -> TokenAmount {
-    let ip_base = expected_reward_for_power(
+    let ip_base = expected_reward_for_power_clamped_at_atto_fil(
         reward_estimate,
         network_qa_power_estimate,
         qa_power,
@@ -215,20 +270,51 @@ pub fn initial_pledge_for_power(
 }
 
 pub fn consensus_fault_penalty(this_epoch_reward: TokenAmount) -> TokenAmount {
-    this_epoch_reward.div_floor(&TokenAmount::from(
-        CONSENSUS_FAULT_FACTOR * EXPECTED_LEADERS_PER_EPOCH,
-    ))
+    (this_epoch_reward * CONSENSUS_FAULT_FACTOR)
+        .div_floor(&TokenAmount::from(EXPECTED_LEADERS_PER_EPOCH))
 }
 
 /// Returns the amount of a reward to vest, and the vesting schedule, for a reward amount.
-pub fn locked_reward_from_reward(
-    reward: TokenAmount,
-    nv: NetworkVersion,
-) -> (TokenAmount, &'static VestSpec) {
-    let lock_amount = if nv >= NetworkVersion::V6 {
-        (reward * &*LOCKED_REWARD_FACTOR_NUM).div_floor(&*LOCKED_REWARD_FACTOR_DENOM)
-    } else {
-        reward
-    };
+pub fn locked_reward_from_reward(reward: TokenAmount) -> (TokenAmount, &'static VestSpec) {
+    let lock_amount = (reward * &*LOCKED_REWARD_FACTOR_NUM).div_floor(&*LOCKED_REWARD_FACTOR_DENOM);
     (lock_amount, &REWARD_VESTING_SPEC)
+}
+
+lazy_static! {
+    static ref ESTIMATED_SINGLE_PROVE_COMMIT_GAS_USAGE: BigInt = BigInt::from(49299973);
+    static ref ESTIMATED_SINGLE_PRE_COMMIT_GAS_USAGE: BigInt = BigInt::from(16433324);
+    static ref BATCH_DISCOUNT_NUM: BigInt = BigInt::from(1);
+    static ref BATCH_DISCOUNT_DENOM: BigInt = BigInt::from(20);
+    static ref BATCH_BALANCER: BigInt = BigInt::from(1_000_000_000) * BigInt::from(5); // 5 * 1 nanoFIL
+}
+pub fn aggregate_prove_commit_network_fee(
+    aggregate_size: i64,
+    base_fee: &TokenAmount,
+) -> TokenAmount {
+    aggregate_network_fee(
+        aggregate_size,
+        &ESTIMATED_SINGLE_PROVE_COMMIT_GAS_USAGE,
+        base_fee,
+    )
+}
+
+pub fn aggregate_pre_commit_network_fee(
+    aggregate_size: i64,
+    base_fee: &TokenAmount,
+) -> TokenAmount {
+    aggregate_network_fee(
+        aggregate_size,
+        &ESTIMATED_SINGLE_PRE_COMMIT_GAS_USAGE,
+        base_fee,
+    )
+}
+
+pub fn aggregate_network_fee(
+    aggregate_size: i64,
+    gas_usage: &BigInt,
+    base_fee: &TokenAmount,
+) -> TokenAmount {
+    let effective_gas_fee = max(base_fee, &*BATCH_BALANCER);
+    let network_fee_num = effective_gas_fee * gas_usage * aggregate_size * &*BATCH_DISCOUNT_NUM;
+    div_floor(network_fee_num, BATCH_DISCOUNT_DENOM.clone())
 }

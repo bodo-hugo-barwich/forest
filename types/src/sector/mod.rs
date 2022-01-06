@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 pub mod post;
@@ -15,6 +15,7 @@ use num_bigint::BigInt;
 use num_derive::FromPrimitive;
 use std::fmt;
 
+/// SectorNumber is a numeric identifier for a sector. It is usually relative to a miner.
 pub type SectorNumber = u64;
 
 /// The maximum assignable sector number.

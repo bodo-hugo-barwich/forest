@@ -1,9 +1,10 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
+use async_std::sync::RwLock;
+use log::{debug, warn};
 use std::{collections::HashMap, sync::Arc};
 
-use async_std::sync::RwLock;
 use blocks::{BlockHeader, Tipset};
 use cid::Cid;
 use clock::ChainEpoch;
@@ -13,7 +14,7 @@ use super::Error;
 
 /// Tracks blocks by their height for the purpose of forming tipsets.
 #[derive(Default)]
-pub struct TipsetTracker<DB> {
+pub(crate) struct TipsetTracker<DB> {
     // TODO: look into optimizing https://github.com/ChainSafe/forest/issues/878
     entries: RwLock<HashMap<ChainEpoch, Vec<Cid>>>,
     db: Arc<DB>,
@@ -36,7 +37,7 @@ impl<DB: BlockStore> TipsetTracker<DB> {
 
         for cid in cids.iter() {
             if cid == header.cid() {
-                log::debug!("tried to add block to tipset tracker that was already there");
+                debug!("tried to add block to tipset tracker that was already there");
                 return;
             }
         }
@@ -45,7 +46,7 @@ impl<DB: BlockStore> TipsetTracker<DB> {
             // TODO: maybe cache the miner address to avoid having to do a blockstore lookup here
             if let Ok(Some(block)) = self.db.get::<BlockHeader>(cid) {
                 if header.miner_address() == block.miner_address() {
-                    log::warn!(
+                    warn!(
                         "Have multiple blocks from miner {} at height {} in our tipset cache {}-{}",
                         header.miner_address(),
                         header.epoch(),
@@ -74,7 +75,7 @@ impl<DB: BlockStore> TipsetTracker<DB> {
                 // TODO: maybe cache the parents tipset keys to avoid having to do a blockstore lookup here
                 let h = self
                     .db
-                    .get::<BlockHeader>(&cid)
+                    .get::<BlockHeader>(cid)
                     .ok()
                     .flatten()
                     .ok_or_else(|| {

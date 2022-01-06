@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use crate::errors::*;
@@ -43,31 +43,30 @@ where
             .ok_or_else(|| Error::State("Power actor address could not be resolved".to_string()))?;
         let mas = miner::State::load(self.blockstore(), &actor)?;
 
-        let proving_sectors = if nv < NetworkVersion::V7 {
+        let proving_sectors = {
             let mut proving_sectors = BitField::new();
-            mas.for_each_deadline(store, |_, deadline| {
-                let mut fault_sectors = BitField::new();
-                deadline.for_each(store, |_, partition: miner::Partition| {
-                    proving_sectors |= &partition.all_sectors();
-                    fault_sectors |= &partition.faulty_sectors();
+
+            if nv < NetworkVersion::V7 {
+                mas.for_each_deadline(store, |_, deadline| {
+                    let mut fault_sectors = BitField::new();
+                    deadline.for_each(store, |_, partition: miner::Partition| {
+                        proving_sectors |= partition.all_sectors();
+                        fault_sectors |= partition.faulty_sectors();
+                        Ok(())
+                    })?;
+
+                    proving_sectors -= &fault_sectors;
                     Ok(())
                 })?;
-
-                proving_sectors -= &fault_sectors;
-                Ok(())
-            })?;
-
-            proving_sectors
-        } else {
-            let mut proving_sectors = BitField::new();
-            mas.for_each_deadline(store, |_, deadline| {
-                deadline.for_each(store, |_, partition: miner::Partition| {
-                    proving_sectors |= &partition.active_sectors();
+            } else {
+                mas.for_each_deadline(store, |_, deadline| {
+                    deadline.for_each(store, |_, partition: miner::Partition| {
+                        proving_sectors |= &partition.active_sectors();
+                        Ok(())
+                    })?;
                     Ok(())
                 })?;
-                Ok(())
-            })?;
-
+            }
             proving_sectors
         };
 
@@ -79,7 +78,7 @@ where
 
         let info = mas.info(store)?;
 
-        let spt = RegisteredSealProof::from_sector_size(info.sector_size, nv);
+        let spt = RegisteredSealProof::from_sector_size(info.sector_size(), nv);
 
         let wpt = spt.registered_winning_post_proof()?;
 
@@ -114,6 +113,7 @@ where
         Ok(out)
     }
 
+    /// Loads sectors for miner at given [Address].
     pub fn get_miner_sector_set<V>(
         &self,
         tipset: &Tipset,
@@ -131,6 +131,7 @@ where
         Ok(mas.load_sectors(self.blockstore(), filter)?)
     }
 
+    /// Returns miner's sector info for a given index.
     pub fn miner_sector_info<V>(
         &self,
         address: &Address,
@@ -148,6 +149,7 @@ where
             .map_err(|err| Error::State(format!("(get sset) failed to get actor state: {:}", err)))
     }
 
+    /// Returns the precommitted sector info for a miner's sector.
     pub fn precommit_info<V>(
         &self,
         address: &Address,
@@ -169,9 +171,10 @@ where
                     err
                 ))
             })?;
-        Ok(precommit_info.ok_or_else(|| Error::Other("precommit not found".to_string()))?)
+        precommit_info.ok_or_else(|| Error::Other("precommit not found".to_string()))
     }
 
+    /// Returns miner info at the given [Tipset]'s state.
     pub fn get_miner_info<V>(
         &self,
         tipset: &Tipset,
@@ -184,29 +187,7 @@ where
             .get_actor(address, tipset.parent_state())?
             .ok_or_else(|| Error::State("Power actor address could not be resolved".to_string()))?;
         let mas = miner::State::load(self.blockstore(), &actor)?;
-        Ok(mas.info(self.blockstore())?)
-    }
-
-    pub fn get_miner_deadlines<V>(
-        &self,
-        tipset: &Tipset,
-        address: &Address,
-    ) -> Result<Vec<Deadline>, Error>
-    where
-        V: ProofVerifier,
-    {
-        let actor = self
-            .get_actor(address, tipset.parent_state())?
-            .ok_or_else(|| Error::State("Power actor address could not be resolved".to_string()))?;
-        let mas = miner::State::load(self.blockstore(), &actor)?;
-        let mut out = Vec::with_capacity(mas.num_deadlines() as usize);
-        mas.for_each_deadline(self.blockstore(), |_, dl| {
-            let post_submissions = dl.into_post_submissions();
-
-            out.push(Deadline { post_submissions });
-            Ok(())
-        })?;
-        Ok(out)
+        mas.info(self.blockstore())
     }
 
     fn for_each_deadline_partition<V, F>(
@@ -238,6 +219,7 @@ where
         Ok(())
     }
 
+    /// Returns a bitfield of all miner's faulty sectors.
     pub fn get_miner_faults<V>(
         &self,
         tipset: &Tipset,
@@ -249,13 +231,14 @@ where
         let mut out = BitField::new();
 
         self.for_each_deadline_partition::<V, _>(tipset, address, |part| {
-            out |= &part.faulty_sectors();
+            out |= part.faulty_sectors();
             Ok(())
         })?;
 
         Ok(out)
     }
 
+    /// Returns bitfield of miner's recovering sectors.
     pub fn get_miner_recoveries<V>(
         &self,
         tipset: &Tipset,
@@ -267,13 +250,14 @@ where
         let mut out = BitField::new();
 
         self.for_each_deadline_partition::<V, _>(tipset, address, |part| {
-            out |= &part.recovering_sectors();
+            out |= part.recovering_sectors();
             Ok(())
         })?;
 
         Ok(out)
     }
 
+    /// Lists all miners that exist in the power actor state at given [Tipset].
     pub fn list_miner_actors<V>(&self, tipset: &Tipset) -> Result<Vec<Address>, Error>
     where
         V: ProofVerifier,
@@ -286,6 +270,7 @@ where
         Ok(power_actor_state.list_all_miners(self.blockstore())?)
     }
 
+    /// Gets miner's worker address from state.
     pub fn get_miner_worker_raw(
         &self,
         state: &Cid,
@@ -302,7 +287,7 @@ where
                 err
             ))
         })?;
-        resolve_to_key_addr(&st, self.blockstore(), &info.worker).map_err(|e| {
+        resolve_to_key_addr(&st, self.blockstore(), &info.worker()).map_err(|e| {
             Error::State(format!(
                 "(get miner worker raw) failed to resolve key addr: {}",
                 e
@@ -311,6 +296,7 @@ where
     }
 }
 
+/// Json serialization formatted Deadline information.
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Deadline {

@@ -1,11 +1,11 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use chain::Error as ChainError;
 use encoding::Error as EncodeError;
 use thiserror::Error;
 
-// /// MessagePool error
+/// MessagePool error.
 #[derive(Debug, PartialEq, Error)]
 pub enum Error {
     /// Error indicating message that's too large

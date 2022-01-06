@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use crate::TokenAmount;
@@ -6,12 +6,16 @@ use cid::Cid;
 use encoding::tuple::*;
 use num_bigint::bigint_ser;
 
-/// State of all actor implementations
+/// State of all actor implementations.
 #[derive(PartialEq, Eq, Clone, Debug, Serialize_tuple, Deserialize_tuple)]
 pub struct ActorState {
+    /// Link to code for the actor.
     pub code: Cid,
+    /// Link to the state of the actor.
     pub state: Cid,
+    /// Sequence of the actor.
     pub sequence: u64,
+    /// Tokens available to the actor.
     #[serde(with = "bigint_ser")]
     pub balance: TokenAmount,
 }
@@ -22,8 +26,8 @@ impl ActorState {
         Self {
             code,
             state,
-            balance,
             sequence,
+            balance,
         }
     }
     /// Safely deducts funds from an Actor
@@ -47,6 +51,7 @@ pub mod json {
     use crate::TokenAmount;
     use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
     use std::str::FromStr;
+
     /// Wrapper for serializing and deserializing a SignedMessage from JSON.
     #[derive(Deserialize, Serialize)]
     #[serde(transparent)]

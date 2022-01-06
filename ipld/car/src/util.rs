@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::error::Error;
@@ -44,9 +44,9 @@ where
 {
     match ld_read(buf_reader).await? {
         Some(buf) => {
-            let cid = Cid::read_bytes(&*buf)?;
-            let len = cid.to_bytes().len();
-            Ok(Some((cid, buf[(len as usize)..].to_owned())))
+            let mut cursor = std::io::Cursor::new(&buf);
+            let cid = Cid::read_bytes(&mut cursor)?;
+            Ok(Some((cid, buf[cursor.position() as usize..].to_vec())))
         }
         None => Ok(None),
     }

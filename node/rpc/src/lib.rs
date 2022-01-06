@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 mod auth_api;
@@ -8,77 +8,38 @@ mod common_api;
 mod gas_api;
 mod mpool_api;
 mod net_api;
+mod rpc_http_handler;
+mod rpc_util;
+mod rpc_ws_handler;
 mod state_api;
 mod sync_api;
 mod wallet_api;
 
-use crate::{beacon_api::beacon_get_entry, common_api::version, state_api::*};
-use async_log::span;
-use async_std::channel::Sender;
-use async_std::net::{TcpListener, TcpStream};
-use async_std::sync::{Arc, RwLock};
-use async_std::task::{self, JoinHandle};
-use async_tungstenite::{
-    tungstenite::handshake::server::Request, tungstenite::Message, WebSocketStream,
-};
-use auth::{has_perms, Error as AuthError, JWT_IDENTIFIER, WRITE_ACCESS};
-use beacon::{Beacon, BeaconSchedule};
-use blocks::Tipset;
+use async_std::sync::Arc;
+use jsonrpc_v2::{Data, Error as JSONRPCError, Server};
+use log::info;
+use tide_websockets::WebSocket;
+
+use beacon::Beacon;
 use blockstore::BlockStore;
-use chain::ChainStore;
-use chain::{headchange_json::HeadChangeJson, EventsPayload};
-use chain_sync::{BadBlockCache, SyncState};
 use fil_types::verifier::ProofVerifier;
-use flo_stream::{MessagePublisher, Publisher, Subscriber};
-use forest_libp2p::NetworkMessage;
-use futures::future;
-use futures::sink::SinkExt;
-use futures::stream::{SplitSink, StreamExt};
-use futures::TryFutureExt;
-use jsonrpc_v2::{
-    Data, Error, Id, MapRouter, RequestBuilder, RequestObject, ResponseObject, ResponseObjects,
-    Server, V2,
+use rpc_api::data_types::RPCState;
+
+use crate::rpc_http_handler::rpc_http_handler;
+use crate::rpc_ws_handler::rpc_ws_handler;
+use crate::{beacon_api::beacon_get_entry, common_api::version, state_api::*};
+
+use rpc_api::{
+    auth_api::*, beacon_api::*, chain_api::*, common_api::*, gas_api::*, mpool_api::*, net_api::*,
+    state_api::*, sync_api::*, wallet_api::*,
 };
-use log::{debug, error, info, warn};
-use message_pool::{MessagePool, MpoolRpcProvider};
-use serde::Serialize;
-use state_manager::StateManager;
-use wallet::KeyStore;
 
-type WsSink = SplitSink<WebSocketStream<TcpStream>, async_tungstenite::tungstenite::Message>;
-
-const CHAIN_NOTIFY_METHOD_NAME: &str = "Filecoin.ChainNotify";
-#[derive(Serialize)]
-struct StreamingData<'a> {
-    json_rpc: &'a str,
-    method: &'a str,
-    params: (usize, Vec<HeadChangeJson<'a>>),
-}
-
-/// This is where you store persistant data, or at least access to stateful data.
-pub struct RpcState<DB, KS, B>
+pub async fn start_rpc<DB, B, V>(
+    state: Arc<RPCState<DB, B>>,
+    rpc_endpoint: &str,
+) -> Result<(), JSONRPCError>
 where
     DB: BlockStore + Send + Sync + 'static,
-    KS: KeyStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
-{
-    pub state_manager: Arc<StateManager<DB>>,
-    pub keystore: Arc<RwLock<KS>>,
-    pub events_pubsub: Arc<RwLock<Publisher<EventsPayload>>>,
-    pub mpool: Arc<MessagePool<MpoolRpcProvider<DB>>>,
-    pub bad_blocks: Arc<BadBlockCache>,
-    pub sync_state: Arc<RwLock<Vec<Arc<RwLock<SyncState>>>>>,
-    pub network_send: Sender<NetworkMessage>,
-    pub new_mined_block_tx: Sender<Arc<Tipset>>,
-    pub network_name: String,
-    pub chain_store: Arc<ChainStore<DB>>,
-    pub beacon: Arc<BeaconSchedule<B>>,
-}
-
-pub async fn start_rpc<DB, KS, B, V>(state: RpcState<DB, KS, B>, rpc_endpoint: &str)
-where
-    DB: BlockStore + Send + Sync + 'static,
-    KS: KeyStore + Send + Sync + 'static,
     B: Beacon + Send + Sync + 'static,
     V: ProofVerifier + Send + Sync + 'static,
 {
@@ -88,594 +49,138 @@ where
     use mpool_api::*;
     use sync_api::*;
     use wallet_api::*;
-    let events_pubsub = state.events_pubsub.clone();
-    let ks = state.keystore.clone();
-    let rpc = Server::new()
-        .with_data(Data::new(state))
-        // Auth API
-        .with_method("Filecoin.AuthNew", auth_new::<DB, KS, B>, false)
-        .with_method("Filecoin.AuthVerify", auth_verify::<DB, KS, B>, false)
-        // Chain API
-        .with_method(
-            "Filecoin.ChainGetMessage",
-            chain_api::chain_get_message::<DB, KS, B>,
-            false,
-        )
-        .with_method("Filecoin.ChainReadObj", chain_read_obj::<DB, KS, B>, false)
-        .with_method("Filecoin.ChainHasObj", chain_has_obj::<DB, KS, B>, false)
-        .with_method(
-            "Filecoin.ChainGetBlockMessages",
-            chain_block_messages::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.ChainGetTipsetByHeight",
-            chain_get_tipset_by_height::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.ChainGetGenesis",
-            chain_get_genesis::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.ChainTipSetWeight",
-            chain_tipset_weight::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.ChainGetTipSet",
-            chain_get_tipset::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.ChainGetRandomnessFromTickets",
-            chain_get_randomness_from_tickets::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.ChainGetRandomnessFromBeacon",
-            chain_get_randomness_from_beacon::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.ChainGetBlock",
-            chain_api::chain_get_block::<DB, KS, B>,
-            false,
-        )
-        .with_method(CHAIN_NOTIFY_METHOD_NAME, chain_notify::<DB, KS, B>, true)
-        .with_method("Filecoin.ChainHead", chain_head::<DB, KS, B>, false)
-        // Message Pool API
-        .with_method(
-            "Filecoin.MpoolEstimateGasPrice",
-            estimate_gas_premium::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.MpoolGetNonce",
-            mpool_get_sequence::<DB, KS, B>,
-            false,
-        )
-        .with_method("Filecoin.MpoolPending", mpool_pending::<DB, KS, B>, false)
-        .with_method("Filecoin.MpoolPush", mpool_push::<DB, KS, B>, false)
-        .with_method(
-            "Filecoin.MpoolPushMessage",
-            mpool_push_message::<DB, KS, B, V>,
-            false,
-        )
-        .with_method("Filecoin.MpoolSelect", mpool_select::<DB, KS, B>, false)
-        // Sync API
-        .with_method("Filecoin.SyncCheckBad", sync_check_bad::<DB, KS, B>, false)
-        .with_method("Filecoin.SyncMarkBad", sync_mark_bad::<DB, KS, B>, false)
-        .with_method("Filecoin.SyncState", sync_state::<DB, KS, B>, false)
-        .with_method(
-            "Filecoin.SyncSubmitBlock",
-            sync_submit_block::<DB, KS, B>,
-            false,
-        )
-        // Wallet API
-        .with_method("Filecoin.WalletBalance", wallet_balance::<DB, KS, B>, false)
-        .with_method(
-            "Filecoin.WalletDefaultAddress",
-            wallet_default_address::<DB, KS, B>,
-            false,
-        )
-        .with_method("Filecoin.WalletExport", wallet_export::<DB, KS, B>, false)
-        .with_method("Filecoin.WalletHas", wallet_has::<DB, KS, B>, false)
-        .with_method("Filecoin.WalletImport", wallet_import::<DB, KS, B>, false)
-        .with_method("Filecoin.WalletList", wallet_list::<DB, KS, B>, false)
-        .with_method("Filecoin.WalletNew", wallet_new::<DB, KS, B>, false)
-        .with_method(
-            "Filecoin.WalletSetDefault",
-            wallet_set_default::<DB, KS, B>,
-            false,
-        )
-        .with_method("Filecoin.WalletSign", wallet_sign::<DB, KS, B>, false)
-        .with_method(
-            "Filecoin.WalletSignMessage",
-            wallet_sign_message::<DB, KS, B>,
-            false,
-        )
-        .with_method("Filecoin.WalletVerify", wallet_verify::<DB, KS, B>, false)
-        // State API
-        .with_method(
-            "Filecoin.StateMinerSectors",
-            state_miner_sectors::<DB, KS, B>,
-            false,
-        )
-        .with_method("Filecoin.StateCall", state_call::<DB, KS, B>, false)
-        .with_method(
-            "Filecoin.StateMinerDeadlines",
-            state_miner_deadlines::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateSectorPrecommitInfo",
-            state_sector_precommit_info::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateSectorGetInfo",
-            state_sector_info::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateMinerProvingDeadline",
-            state_miner_proving_deadline::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateMinerInfo",
-            state_miner_info::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateMinerFaults",
-            state_miner_faults::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateAllMinerFaults",
-            state_all_miner_faults::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateMinerRecoveries",
-            state_miner_recoveries::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateMinerPartitions",
-            state_miner_partitions::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateMinerPreCommitDepositForPower",
-            state_miner_pre_commit_deposit_for_power::<DB, KS, B, V>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateMinerInitialPledgeCollateral",
-            state_miner_initial_pledge_collateral::<DB, KS, B, V>,
-            false,
-        )
-        .with_method("Filecoin.StateReplay", state_replay::<DB, KS, B>, false)
-        .with_method(
-            "Filecoin.StateGetActor",
-            state_get_actor::<DB, KS, B, V>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateAccountKey",
-            state_account_key::<DB, KS, B, V>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateLookupId",
-            state_lookup_id::<DB, KS, B, V>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateMarketBalance",
-            state_market_balance::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateMarketDeals",
-            state_market_deals::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateGetReceipt",
-            state_get_receipt::<DB, KS, B>,
-            false,
-        )
-        .with_method("Filecoin.StateWaitMsg", state_wait_msg::<DB, KS, B>, false)
-        .with_method(
-            "Filecoin.StateMinerSectorAllocated",
-            state_miner_sector_allocated::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateNetworkName",
-            state_network_name::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.MinerGetBaseInfo",
-            state_miner_get_base_info::<DB, KS, B, V>,
-            false,
-        )
-        .with_method(
-            "Filecoin.MinerCreateBlock",
-            miner_create_block::<DB, KS, B, V>,
-            false,
-        )
-        .with_method(
-            "Filecoin.StateNetworkVersion",
-            state_get_network_version::<DB, KS, B>,
-            false,
-        )
-        // Gas API
-        .with_method(
-            "Filecoin.GasEstimateGasLimit",
-            gas_estimate_gas_limit::<DB, KS, B, V>,
-            false,
-        )
-        .with_method(
-            "Filecoin.GasEstimateGasPremium",
-            gas_estimate_gas_premium::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.GasEstimateFeeCap",
-            gas_estimate_fee_cap::<DB, KS, B>,
-            false,
-        )
-        .with_method(
-            "Filecoin.GasEstimateMessageGas",
-            gas_estimate_message_gas::<DB, KS, B, V>,
-            false,
-        )
-        // Common
-        .with_method("Filecoin.Version", version, false)
-        //beacon
-        .with_method(
-            "Filecoin.BeaconGetEntry",
-            beacon_get_entry::<DB, KS, B>,
-            false,
-        )
-        // Net
-        .with_method(
-            "Filecoin.NetAddrsListen",
-            net_api::net_addrs_listen::<DB, KS, B>,
-            false,
-        )
-        .finish_unwrapped();
 
-    let try_socket = TcpListener::bind(rpc_endpoint).await;
-    let listener = try_socket.expect("Failed to bind to addr");
-    let rpc_state = Arc::new(rpc);
-    let chain_notify_count: Arc<RwLock<usize>> = Default::default();
+    let rpc_server = Arc::new(
+        Server::new()
+            .with_data(Data(state))
+            // Auth API
+            .with_method(AUTH_NEW, auth_new::<DB, B>)
+            .with_method(AUTH_VERIFY, auth_verify::<DB, B>)
+            // Beacon API
+            .with_method(BEACON_GET_ENTRY, beacon_get_entry::<DB, B>)
+            // Chain API
+            .with_method(CHAIN_GET_MESSAGE, chain_api::chain_get_message::<DB, B>)
+            .with_method(CHAIN_READ_OBJ, chain_read_obj::<DB, B>)
+            .with_method(CHAIN_HAS_OBJ, chain_has_obj::<DB, B>)
+            .with_method(CHAIN_GET_BLOCK_MESSAGES, chain_get_block_messages::<DB, B>)
+            .with_method(
+                CHAIN_GET_TIPSET_BY_HEIGHT,
+                chain_get_tipset_by_height::<DB, B>,
+            )
+            .with_method(CHAIN_GET_GENESIS, chain_get_genesis::<DB, B>)
+            .with_method(CHAIN_TIPSET_WEIGHT, chain_tipset_weight::<DB, B>)
+            .with_method(CHAIN_GET_TIPSET, chain_get_tipset::<DB, B>)
+            .with_method(CHAIN_HEAD, chain_head::<DB, B>)
+            .with_method(CHAIN_HEAD_SUBSCRIPTION, chain_head_subscription::<DB, B>)
+            // * Filecoin.ChainNotify is handled specifically in middleware for streaming
+            .with_method(CHAIN_NOTIFY, chain_notify::<DB, B>)
+            .with_method(
+                CHAIN_GET_RANDOMNESS_FROM_TICKETS,
+                chain_get_randomness_from_tickets::<DB, B>,
+            )
+            .with_method(
+                CHAIN_GET_RANDOMNESS_FROM_BEACON,
+                chain_get_randomness_from_beacon::<DB, B>,
+            )
+            .with_method(CHAIN_GET_BLOCK, chain_api::chain_get_block::<DB, B>)
+            // Message Pool API
+            .with_method(MPOOL_ESTIMATE_GAS_PRICE, estimate_gas_premium::<DB, B>)
+            .with_method(MPOOL_GET_NONCE, mpool_get_sequence::<DB, B>)
+            .with_method(MPOOL_PENDING, mpool_pending::<DB, B>)
+            .with_method(MPOOL_PUSH, mpool_push::<DB, B>)
+            .with_method(MPOOL_PUSH_MESSAGE, mpool_push_message::<DB, B, V>)
+            .with_method(MPOOL_SELECT, mpool_select::<DB, B>)
+            // Sync API
+            .with_method(SYNC_CHECK_BAD, sync_check_bad::<DB, B>)
+            .with_method(SYNC_MARK_BAD, sync_mark_bad::<DB, B>)
+            .with_method(SYNC_STATE, sync_state::<DB, B>)
+            .with_method(SYNC_SUBMIT_BLOCK, sync_submit_block::<DB, B>)
+            // Wallet API
+            .with_method(WALLET_BALANCE, wallet_balance::<DB, B>)
+            .with_method(WALLET_DEFAULT_ADDRESS, wallet_default_address::<DB, B>)
+            .with_method(WALLET_EXPORT, wallet_export::<DB, B>)
+            .with_method(WALLET_HAS, wallet_has::<DB, B>)
+            .with_method(WALLET_IMPORT, wallet_import::<DB, B>)
+            .with_method(WALLET_LIST, wallet_list::<DB, B>)
+            .with_method(WALLET_NEW, wallet_new::<DB, B>)
+            .with_method(WALLET_SET_DEFAULT, wallet_set_default::<DB, B>)
+            .with_method(WALLET_SIGN, wallet_sign::<DB, B>)
+            .with_method(WALLET_SIGN_MESSAGE, wallet_sign_message::<DB, B>)
+            .with_method(WALLET_VERIFY, wallet_verify::<DB, B>)
+            // State API
+            .with_method(STATE_MINER_SECTORS, state_miner_sectors::<DB, B>)
+            .with_method(STATE_CALL, state_call::<DB, B>)
+            .with_method(STATE_MINER_DEADLINES, state_miner_deadlines::<DB, B>)
+            .with_method(
+                STATE_SECTOR_PRECOMMIT_INFO,
+                state_sector_precommit_info::<DB, B>,
+            )
+            .with_method(STATE_MINER_INFO, state_miner_info::<DB, B>)
+            .with_method(STATE_SECTOR_GET_INFO, state_sector_info::<DB, B>)
+            .with_method(
+                STATE_MINER_PROVING_DEADLINE,
+                state_miner_proving_deadline::<DB, B>,
+            )
+            .with_method(STATE_MINER_FAULTS, state_miner_faults::<DB, B>)
+            .with_method(STATE_ALL_MINER_FAULTS, state_all_miner_faults::<DB, B>)
+            .with_method(STATE_MINER_RECOVERIES, state_miner_recoveries::<DB, B>)
+            .with_method(STATE_MINER_PARTITIONS, state_miner_partitions::<DB, B>)
+            .with_method(STATE_REPLAY, state_replay::<DB, B>)
+            .with_method(STATE_NETWORK_NAME, state_network_name::<DB, B>)
+            .with_method(STATE_NETWORK_VERSION, state_get_network_version::<DB, B>)
+            .with_method(STATE_REPLAY, state_replay::<DB, B>)
+            .with_method(STATE_GET_ACTOR, state_get_actor::<DB, B, V>)
+            .with_method(STATE_LIST_ACTORS, state_list_actors::<DB, B, V>)
+            .with_method(STATE_ACCOUNT_KEY, state_account_key::<DB, B, V>)
+            .with_method(STATE_LOOKUP_ID, state_lookup_id::<DB, B, V>)
+            .with_method(STATE_MARKET_BALANCE, state_market_balance::<DB, B>)
+            .with_method(STATE_MARKET_DEALS, state_market_deals::<DB, B>)
+            .with_method(STATE_GET_RECEIPT, state_get_receipt::<DB, B>)
+            .with_method(STATE_WAIT_MSG, state_wait_msg::<DB, B>)
+            .with_method(MINER_CREATE_BLOCK, miner_create_block::<DB, B, V>)
+            .with_method(
+                STATE_MINER_SECTOR_ALLOCATED,
+                state_miner_sector_allocated::<DB, B>,
+            )
+            .with_method(STATE_MINER_POWER, state_miner_power::<DB, B, V>)
+            .with_method(
+                STATE_MINER_PRE_COMMIT_DEPOSIT_FOR_POWER,
+                state_miner_pre_commit_deposit_for_power::<DB, B, V>,
+            )
+            .with_method(
+                STATE_MINER_INITIAL_PLEDGE_COLLATERAL,
+                state_miner_initial_pledge_collateral::<DB, B, V>,
+            )
+            .with_method(MINER_GET_BASE_INFO, miner_get_base_info::<DB, B, V>)
+            // Gas API
+            .with_method(GAS_ESTIMATE_FEE_CAP, gas_estimate_fee_cap::<DB, B>)
+            .with_method(GAS_ESTIMATE_GAS_LIMIT, gas_estimate_gas_limit::<DB, B, V>)
+            .with_method(GAS_ESTIMATE_GAS_PREMIUM, gas_estimate_gas_premium::<DB, B>)
+            .with_method(
+                GAS_ESTIMATE_MESSAGE_GAS,
+                gas_estimate_message_gas::<DB, B, V>,
+            )
+            // Common API
+            .with_method(VERSION, version)
+            // Net API
+            .with_method(NET_ADDRS_LISTEN, net_api::net_addrs_listen::<DB, B>)
+            .with_method(NET_PEERS, net_api::net_peers::<DB, B>)
+            .with_method(NET_CONNECT, net_api::net_connect::<DB, B>)
+            .with_method(NET_DISCONNECT, net_api::net_disconnect::<DB, B>)
+            .finish_unwrapped(),
+    );
 
-    info!("waiting for web socket connections");
-    while let Ok((stream, addr)) = listener.accept().await {
-        let subscriber = events_pubsub.write().await.subscribe();
-        task::spawn(handle_connection_and_log(
-            rpc_state.clone(),
-            ks.clone(),
-            stream,
-            addr,
-            events_pubsub.clone(),
-            subscriber,
-            chain_notify_count.clone(),
-        ));
-    }
+    let mut app = tide::with_state(Arc::clone(&rpc_server));
 
-    info!("Stopped accepting websocket connections");
-}
+    app.at("/rpc/v0")
+        .get(WebSocket::new(rpc_ws_handler::<DB, B>))
+        .post(rpc_http_handler::<DB, B>);
 
-async fn handle_connection_and_log<KS: KeyStore + Send + Sync + 'static>(
-    state: Arc<Server<MapRouter>>,
-    ks: Arc<RwLock<KS>>,
-    tcp_stream: TcpStream,
-    addr: std::net::SocketAddr,
-    events_out: Arc<RwLock<Publisher<EventsPayload>>>,
-    events_in: Subscriber<EventsPayload>,
-    chain_notify_count: Arc<RwLock<usize>>,
-) {
-    span!("handle_connection_and_log", {
-        let mut authorization_header: Arc<Option<String>> = Arc::new(None);
-        if let Ok(ws_stream) =
-            async_tungstenite::accept_hdr_async(tcp_stream, |request: &Request, response| {
-                if let Some(authorization) = request.headers().get("Authorization") {
-                    // not all methods require authorization
-                    authorization_header = Arc::new(
-                        authorization
-                            .to_str()
-                            .map(|s| Some(s.to_string()))
-                            .unwrap_or_default(),
-                    );
-                }
-                Ok(response)
-            })
-            .await
-        {
-            debug!("accepted websocket connection at {:}", addr);
-            let (ws_sender, mut ws_receiver) = ws_stream.split();
-            let ws_sender = Arc::new(RwLock::new(ws_sender));
-            while let Some(message_result) = ws_receiver.next().await {
-                let s = state.clone();
-                let ws_sender_clone = ws_sender.clone();
-                let ks_clone = ks.clone();
-                let auth_header_clone = authorization_header.clone();
-                let events_out_clone = events_out.clone();
-                let events_in_clone = events_in.clone();
-                let chain_notify_count_shared = chain_notify_count.clone();
-                task::spawn(async move {
-                    let mut chain_notify_count_curr: usize =
-                        *chain_notify_count_shared.read().await;
-                    match message_result {
-                        Ok(message) => {
-                            let request_text = message.into_text().unwrap();
-                            if request_text.is_empty() {
-                                return;
-                            }
-                            info!("RPC Request Received: {:?}", request_text.clone());
-                            match serde_json::from_str(&request_text)
-                                as Result<RequestObject, serde_json::Error>
-                            {
-                                Ok(call) => {
-                                    // hacky but due to the limitations of jsonrpc_v2 impl
-                                    // if this expands, better to implement some sort of middleware
+    info!("Ready for RPC connections");
 
-                                    let call = if &*call.method == CHAIN_NOTIFY_METHOD_NAME {
-                                        let mut x = chain_notify_count_shared.write().await;
-                                        *x += 1;
-                                        chain_notify_count_curr = *x;
-                                        drop(x);
+    app.listen(rpc_endpoint).await?;
 
-                                        RequestBuilder::default()
-                                            .with_id(
-                                                call.id.unwrap_or_default().unwrap_or_default(),
-                                            )
-                                            .with_params(chain_notify_count_curr)
-                                            .with_method(CHAIN_NOTIFY_METHOD_NAME)
-                                            .finish()
-                                    } else {
-                                        call
-                                    };
-                                    let response = handle_rpc(
-                                        &s.clone(),
-                                        &ks_clone,
-                                        call,
-                                        &auth_header_clone.as_ref(),
-                                    )
-                                    .await
-                                    .unwrap_or_else(|e| {
-                                        ResponseObjects::One(ResponseObject::Error {
-                                            jsonrpc: V2,
-                                            error: Error::Full {
-                                                code: 1,
-                                                message: e.message(),
-                                                data: None,
-                                            },
-                                            id: Id::Null,
-                                        })
-                                    });
-                                    let error_send = ws_sender_clone.clone();
+    info!("Stopped accepting RPC connections");
 
-                                    // initiate response and streaming if applicable
-                                    let join_handle = streaming_payload(
-                                        ws_sender_clone.clone(),
-                                        response,
-                                        chain_notify_count_curr,
-                                        events_out_clone.clone(),
-                                        events_in_clone.clone(),
-                                    )
-                                    .map_err(|e| async move {
-                                        send_error(
-                                            3,
-                                            &error_send,
-                                            format!(
-                                                "channel id {:}, error {:?}",
-                                                chain_notify_count_curr,
-                                                e.message()
-                                            ),
-                                        )
-                                        .await
-                                        .unwrap_or_else(
-                                            |e| {
-                                                error!(
-                                                    "error {:?} on socket {:?}",
-                                                    e.message(),
-                                                    addr
-                                                )
-                                            },
-                                        );
-                                    })
-                                    .await
-                                    .unwrap_or_else(|_| {
-                                        error!("error sending on socket {:?}", addr);
-                                        None
-                                    });
-
-                                    // wait for join handle to complete if there is error and send it over the network and cancel streaming
-                                    let error_join_send = ws_sender_clone.clone();
-                                    let handle_events_out = events_out_clone.clone();
-                                    task::spawn(async move {
-                                        if let Some(handle) = join_handle {
-                                            handle
-                                                .map_err(|e| async move {
-                                                    send_error(
-                                                        3,
-                                                        &error_join_send,
-                                                        format!(
-                                                            "channel id {:}, error {:?}",
-                                                            chain_notify_count_curr,
-                                                            e.message()
-                                                        ),
-                                                    )
-                                                    .await
-                                                    .unwrap_or_else(|e| {
-                                                        error!(
-                                                            "error {:?} on socket {:?}",
-                                                            e.message(),
-                                                            addr
-                                                        )
-                                                    });
-                                                })
-                                                .await
-                                                .unwrap_or_else(|_| {
-                                                    error!("error sending on socket {:?}", addr)
-                                                });
-
-                                            handle_events_out
-                                                .write()
-                                                .await
-                                                .publish(EventsPayload::TaskCancel(
-                                                    chain_notify_count_curr,
-                                                    (),
-                                                ))
-                                                .await;
-                                        }
-                                    });
-                                }
-                                Err(e) => send_error(1, &ws_sender_clone, e.to_string())
-                                    .await
-                                    .unwrap_or_else(|e| {
-                                        error!("error {:?} on socket {:?}", e.message(), addr)
-                                    }),
-                            }
-                        }
-                        Err(e) => send_error(2, &ws_sender_clone, e.to_string())
-                            .await
-                            .unwrap_or_else(|e| {
-                                error!("error {:?} on socket {:?}", e.message(), addr)
-                            }),
-                    };
-                });
-            }
-        } else {
-            warn!("web socket connection failed at {:}", addr)
-        }
-    })
-}
-
-async fn handle_rpc<KS: KeyStore>(
-    state: &Arc<Server<MapRouter>>,
-    ks: &Arc<RwLock<KS>>,
-    call: RequestObject,
-    authorization_header: &Option<String>,
-) -> Result<ResponseObjects, Error> {
-    if WRITE_ACCESS.contains(&&*call.method) {
-        if let Some(header) = authorization_header {
-            // let keystore = PersistentKeyStore::new(get_home_dir() + "/.forest")?;
-            let ki = ks
-                .read()
-                .await
-                .get(JWT_IDENTIFIER)
-                .map_err(|_| AuthError::Other("No JWT private key found".to_owned()))?;
-            let key = ki.private_key();
-            let perms = has_perms(header.to_string(), "write", key);
-            if perms.is_err() {
-                return Err(perms.unwrap_err());
-            }
-        } else {
-            return Ok(ResponseObjects::One(ResponseObject::Error {
-                jsonrpc: V2,
-                error: Error::Full {
-                    code: 200,
-                    message: AuthError::NoAuthHeader.to_string(),
-                    data: None,
-                },
-                id: Id::Null,
-            }));
-        }
-    };
-
-    Ok(state.handle(call).await)
-}
-
-async fn send_error(code: i64, ws_sender: &RwLock<WsSink>, message: String) -> Result<(), Error> {
-    let response = ResponseObjects::One(ResponseObject::Error {
-        jsonrpc: V2,
-        error: Error::Full {
-            code,
-            message,
-            data: None,
-        },
-        id: Id::Null,
-    });
-    let response_text = serde_json::to_string(&response)?;
-    ws_sender
-        .write()
-        .await
-        .send(Message::text(response_text))
-        .await?;
     Ok(())
-}
-async fn streaming_payload(
-    ws_sender: Arc<RwLock<WsSink>>,
-    response_object: ResponseObjects,
-    streaming_count: usize,
-    events_out: Arc<RwLock<Publisher<EventsPayload>>>,
-    events_in: Subscriber<EventsPayload>,
-) -> Result<Option<JoinHandle<Result<(), Error>>>, Error> {
-    let response_text = serde_json::to_string(&response_object)?;
-    ws_sender
-        .write()
-        .await
-        .send(Message::text(response_text))
-        .await?;
-    if let ResponseObjects::One(ResponseObject::Result {
-        jsonrpc: _,
-        result: _,
-        id: _,
-        streaming,
-    }) = response_object
-    {
-        if streaming {
-            let handle = task::spawn(async move {
-                let mut filter_on_channel_id = events_in.filter(|s| {
-                    future::ready(
-                        s.sub_head_changes()
-                            .map(|s| streaming_count == s.0)
-                            .unwrap_or_default(),
-                    )
-                });
-                while let Some(event) = filter_on_channel_id.next().await {
-                    if let EventsPayload::SubHeadChanges(ref index_to_head_change) = event {
-                        if streaming_count == index_to_head_change.0 {
-                            let head_change = (&index_to_head_change.1).into();
-                            let data = StreamingData {
-                                json_rpc: "2.0",
-                                method: "xrpc.ch.val",
-                                params: (streaming_count, vec![head_change]),
-                            };
-                            let response_text = serde_json::to_string(&data)?;
-                            ws_sender
-                                .write()
-                                .await
-                                .send(Message::text(response_text))
-                                .await?;
-                        }
-                    }
-                }
-
-                Ok::<(), Error>(())
-            });
-
-            Ok(Some(handle))
-        } else {
-            Ok(None)
-        }
-    } else {
-        events_out
-            .write()
-            .await
-            .publish(EventsPayload::TaskCancel(streaming_count, ()))
-            .await;
-        Ok(None)
-    }
 }

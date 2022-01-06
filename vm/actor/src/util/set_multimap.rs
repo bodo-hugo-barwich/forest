@@ -1,10 +1,11 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::Set;
-use crate::{make_map, make_map_with_root, parse_uint_key, u64_key, DealID, Map};
+use crate::{make_empty_map, make_map_with_root, parse_uint_key, u64_key, DealID, Map};
 use cid::Cid;
 use clock::ChainEpoch;
+use fil_types::HAMT_BIT_WIDTH;
 use ipld_blockstore::BlockStore;
 use ipld_hamt::Error;
 use std::borrow::Borrow;
@@ -19,7 +20,7 @@ where
 {
     /// Initializes a new empty SetMultimap.
     pub fn new(bs: &'a BS) -> Self {
-        Self(make_map(bs))
+        Self(make_empty_map(bs, HAMT_BIT_WIDTH))
     }
 
     /// Initializes a SetMultimap from a root Cid.
@@ -44,7 +45,8 @@ where
         let new_root = set.root()?;
 
         // Set hamt node to set new root
-        Ok(self.0.set(u64_key(key as u64), new_root)?)
+        self.0.set(u64_key(key as u64), new_root)?;
+        Ok(())
     }
 
     /// Puts slice of DealIDs in the hash set of the key.
@@ -64,14 +66,15 @@ where
         let new_root = set.root()?;
 
         // Set hamt node to set new root
-        Ok(self.0.set(u64_key(key as u64), new_root)?)
+        self.0.set(u64_key(key as u64), new_root)?;
+        Ok(())
     }
 
     /// Gets the set at the given index of the `SetMultimap`
     #[inline]
     pub fn get(&self, key: ChainEpoch) -> Result<Option<Set<'a, BS>>, Box<dyn StdError>> {
         match self.0.get(&u64_key(key as u64))? {
-            Some(cid) => Ok(Some(Set::from_root(self.0.store(), &cid)?)),
+            Some(cid) => Ok(Some(Set::from_root(self.0.store(), cid)?)),
             None => Ok(None),
         }
     }
@@ -89,8 +92,8 @@ where
 
         // Save and calculate new root
         let new_root = set.root()?;
-
-        Ok(self.0.set(u64_key(key as u64), new_root)?)
+        self.0.set(u64_key(key as u64), new_root)?;
+        Ok(())
     }
 
     /// Removes set at index.
@@ -114,7 +117,7 @@ where
         };
 
         set.for_each(|k| {
-            let v = parse_uint_key(&k)
+            let v = parse_uint_key(k)
                 .map_err(|e| format!("Could not parse key: {:?}, ({})", &k.0, e))?;
 
             // Run function on all parsed keys

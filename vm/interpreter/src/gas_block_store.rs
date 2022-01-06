@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::gas_tracker::{GasTracker, PriceList};
@@ -40,7 +40,7 @@ where
             .borrow_mut()
             .charge_gas(self.price_list.on_ipld_put(bytes.len()))?;
 
-        Ok(self.store.put_raw(bytes, code)?)
+        self.store.put_raw(bytes, code)
     }
 }
 

@@ -1,28 +1,35 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use crate::ActorVersion;
 use cid::Cid;
+use fil_types::HAMT_BIT_WIDTH;
 use forest_hash_utils::{BytesKey, Hash};
 use ipld_blockstore::BlockStore;
 use serde::{de::DeserializeOwned, Serialize};
 use std::borrow::Borrow;
 use std::error::Error;
-
 pub enum Map<'a, BS, V> {
     V0(actorv0::Map<'a, BS, V>),
     V2(actorv2::Map<'a, BS, V>),
+    V3(actorv3::Map<'a, BS, V>),
+    V4(actorv4::Map<'a, BS, V>),
+    V5(actorv5::Map<'a, BS, V>),
 }
 
 impl<'a, BS, V> Map<'a, BS, V>
 where
-    V: Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned + PartialEq,
     BS: BlockStore,
 {
     pub fn new(store: &'a BS, version: ActorVersion) -> Self {
         match version {
             ActorVersion::V0 => Map::V0(actorv0::make_map(store)),
             ActorVersion::V2 => Map::V2(actorv2::make_map(store)),
+            ActorVersion::V3 => Map::V3(actorv3::make_empty_map(store, HAMT_BIT_WIDTH)),
+            ActorVersion::V4 => Map::V4(actorv4::make_empty_map(store, HAMT_BIT_WIDTH)),
+            ActorVersion::V5 => Map::V5(actorv5::make_empty_map(store, HAMT_BIT_WIDTH)),
+            ActorVersion::V6 => Map::V5(actorv5::make_empty_map(store, HAMT_BIT_WIDTH)),
         }
     }
 
@@ -31,6 +38,10 @@ where
         match version {
             ActorVersion::V0 => Ok(Map::V0(actorv0::make_map_with_root(cid, store)?)),
             ActorVersion::V2 => Ok(Map::V2(actorv2::make_map_with_root(cid, store)?)),
+            ActorVersion::V3 => Ok(Map::V3(actorv3::make_map_with_root(cid, store)?)),
+            ActorVersion::V4 => Ok(Map::V4(actorv4::make_map_with_root(cid, store)?)),
+            ActorVersion::V5 => Ok(Map::V5(actorv5::make_map_with_root(cid, store)?)),
+            ActorVersion::V6 => Ok(Map::V5(actorv5::make_map_with_root(cid, store)?)),
         }
     }
 
@@ -39,6 +50,9 @@ where
         match self {
             Map::V0(m) => m.store(),
             Map::V2(m) => m.store(),
+            Map::V3(m) => m.store(),
+            Map::V4(m) => m.store(),
+            Map::V5(m) => m.store(),
         }
     }
 
@@ -47,6 +61,18 @@ where
         match self {
             Map::V0(m) => Ok(m.set(key, value)?),
             Map::V2(m) => Ok(m.set(key, value)?),
+            Map::V3(m) => {
+                m.set(key, value)?;
+                Ok(())
+            }
+            Map::V4(m) => {
+                m.set(key, value)?;
+                Ok(())
+            }
+            Map::V5(m) => {
+                m.set(key, value)?;
+                Ok(())
+            }
         }
     }
 
@@ -60,6 +86,9 @@ where
         match self {
             Map::V0(m) => Ok(m.get(k)?),
             Map::V2(m) => Ok(m.get(k)?),
+            Map::V3(m) => Ok(m.get(k)?),
+            Map::V4(m) => Ok(m.get(k)?),
+            Map::V5(m) => Ok(m.get(k)?),
         }
     }
 
@@ -72,6 +101,9 @@ where
         match self {
             Map::V0(m) => Ok(m.contains_key(k)?),
             Map::V2(m) => Ok(m.contains_key(k)?),
+            Map::V3(m) => Ok(m.contains_key(k)?),
+            Map::V4(m) => Ok(m.contains_key(k)?),
+            Map::V5(m) => Ok(m.contains_key(k)?),
         }
     }
 
@@ -85,6 +117,9 @@ where
         match self {
             Map::V0(m) => Ok(m.delete(k)?),
             Map::V2(m) => Ok(m.delete(k)?),
+            Map::V3(m) => Ok(m.delete(k)?),
+            Map::V4(m) => Ok(m.delete(k)?),
+            Map::V5(m) => Ok(m.delete(k)?),
         }
     }
 
@@ -93,6 +128,9 @@ where
         match self {
             Map::V0(m) => Ok(m.flush()?),
             Map::V2(m) => Ok(m.flush()?),
+            Map::V3(m) => Ok(m.flush()?),
+            Map::V4(m) => Ok(m.flush()?),
+            Map::V5(m) => Ok(m.flush()?),
         }
     }
 
@@ -105,6 +143,9 @@ where
         match self {
             Map::V0(m) => m.for_each(f),
             Map::V2(m) => m.for_each(f),
+            Map::V3(m) => m.for_each(f),
+            Map::V4(m) => m.for_each(f),
+            Map::V5(m) => m.for_each(f),
         }
     }
 }

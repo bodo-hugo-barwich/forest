@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 mod balance_table;
@@ -12,6 +12,7 @@ pub mod smooth;
 mod unmarshallable;
 
 pub use self::balance_table::BalanceTable;
+pub use self::balance_table::BALANCE_TABLE_BITWIDTH;
 pub use self::downcast::*;
 pub use self::multimap::*;
 pub use self::set::Set;

@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::{BLS_PUB_LEN, PAYLOAD_HASH_LEN, SECP_PUB_LEN};
@@ -30,6 +30,8 @@ pub enum Error {
     Base32Decoding(#[from] DecodeError),
     #[error("Cannot get id from non id address")]
     NonIDAddress,
+    #[error("Invalid address ID payload")]
+    InvalidAddressIDPayload(Vec<u8>),
 }
 
 impl From<num::ParseIntError> for Error {

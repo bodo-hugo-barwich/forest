@@ -1,11 +1,11 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use async_trait::async_trait;
+use asynchronous_codec::FramedRead;
 use forest_encoding::to_vec;
 use futures::prelude::*;
 use futures_cbor_codec::Decoder;
-use futures_codec::FramedRead;
 use libp2p::core::ProtocolName;
 use libp2p::request_response::OutboundFailure;
 use libp2p::request_response::RequestResponseCodec;
@@ -13,6 +13,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::io;
 use std::marker::PhantomData;
 
+/// Generic Cbor RequestResponse type. This is just needed to satisfy [RequestResponseCodec]
+/// for Hello and ChainExchange protocols without duplication.
 #[derive(Clone)]
 pub struct CborRequestResponse<P, RQ, RS> {
     protocol: PhantomData<P>,

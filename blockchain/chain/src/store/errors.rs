@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use blocks::Error as BlkErr;
@@ -20,7 +20,7 @@ pub enum Error {
     NoBlocks,
     /// Key not found in database
     #[error("{0} not found")]
-    NotFound(&'static str),
+    NotFound(String),
     /// Error originating from key-value store
     #[error(transparent)]
     DB(#[from] DbErr),

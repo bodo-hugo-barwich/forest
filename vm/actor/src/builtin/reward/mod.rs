@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 pub(crate) mod expneg;
@@ -10,22 +10,21 @@ pub use self::logic::*;
 pub use self::state::{Reward, State, VestingFunction};
 pub use self::types::*;
 use crate::network::EXPECTED_LEADERS_PER_EPOCH;
-use crate::{
-    check_empty_params, miner, BURNT_FUNDS_ACTOR_ADDR, STORAGE_POWER_ACTOR_ADDR, SYSTEM_ACTOR_ADDR,
-};
+use crate::{miner, BURNT_FUNDS_ACTOR_ADDR, STORAGE_POWER_ACTOR_ADDR, SYSTEM_ACTOR_ADDR};
 use fil_types::StoragePower;
 use ipld_blockstore::BlockStore;
+use log::{error, warn};
 use num_bigint::Sign;
 use num_bigint::{bigint_ser::BigIntDe, Integer};
 use num_derive::FromPrimitive;
-use num_traits::FromPrimitive;
+use num_traits::{FromPrimitive, Signed};
 use runtime::{ActorCode, Runtime};
 use vm::{
     actor_error, ActorError, ExitCode, MethodNum, Serialized, TokenAmount, METHOD_CONSTRUCTOR,
     METHOD_SEND,
 };
 
-// * Updated to specs-actors commit: e195950ba98adb8ce362030356bf4a3809b7ec77 (v2.3.2)
+// * Updated to specs-actors commit: 999e57a151cc7ada020ca2844b651499ab8c0dec (v3.0.1)
 
 /// PenaltyMultiplier is the factor miner penaltys are scaled up by
 pub const PENALTY_MULTIPLIER: u64 = 3;
@@ -127,20 +126,20 @@ impl Actor {
             let mut total_reward = &params.gas_reward + &block_reward;
             let curr_balance = rt.current_balance()?;
             if total_reward > curr_balance {
-                log::warn!(
+                warn!(
                     "reward actor balance {} below totalReward expected {},\
                     paying out rest of balance",
-                    curr_balance,
-                    total_reward
+                    curr_balance, total_reward
                 );
                 total_reward = curr_balance;
                 block_reward = &total_reward - &params.gas_reward;
-                assert_ne!(
-                    block_reward.sign(),
-                    Sign::Minus,
-                    "block reward {} below zero",
-                    block_reward
-                );
+                if block_reward.is_negative() {
+                    return Err(actor_error!(
+                        ErrIllegalState,
+                        "programming error, block reward {} below zero",
+                        block_reward
+                    ));
+                }
             }
             st.total_storage_power_reward += block_reward;
             Ok(total_reward)
@@ -148,12 +147,14 @@ impl Actor {
 
         // * Go implementation added this and removed capping it -- this could potentially panic
         // * as they treat panics as an exit code. Revisit this.
-        assert!(
-            total_reward <= prior_balance,
-            "reward {} exceeds balance {}",
-            total_reward,
-            prior_balance
-        );
+        if total_reward > prior_balance {
+            return Err(actor_error!(
+                ErrIllegalState,
+                "reward {} exceeds balance {}",
+                total_reward,
+                prior_balance
+            ));
+        }
 
         // if this fails, we can assume the miner is responsible and avoid failing here.
         let reward_params = miner::ApplyRewardParams {
@@ -167,7 +168,7 @@ impl Actor {
             total_reward.clone(),
         );
         if let Err(e) = res {
-            log::error!(
+            error!(
                 "failed to send ApplyRewards call to the miner actor with funds {}, code: {:?}",
                 total_reward,
                 e.exit_code()
@@ -179,7 +180,7 @@ impl Actor {
                 total_reward,
             );
             if let Err(e) = res {
-                log::error!(
+                error!(
                     "failed to send unsent reward to the burnt funds actor, code: {:?}",
                     e.exit_code()
                 );
@@ -258,7 +259,6 @@ impl ActorCode for Actor {
                 Ok(Serialized::default())
             }
             Some(Method::ThisEpochReward) => {
-                check_empty_params(params)?;
                 let res = Self::this_epoch_reward(rt)?;
                 Ok(Serialized::serialize(&res)?)
             }

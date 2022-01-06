@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 mod actor_code;
@@ -159,6 +159,8 @@ pub trait Runtime<BS: BlockStore>: Syscalls {
             }
         })
     }
+
+    fn base_fee(&self) -> &TokenAmount;
 }
 
 /// Message information available to the actor about executing message.
@@ -199,7 +201,7 @@ pub trait Syscalls {
     fn verify_seal(&self, vi: &SealVerifyInfo) -> Result<(), Box<dyn StdError>>;
 
     /// Verifies a window proof of spacetime.
-    fn verify_post(&self, verify_info: &WindowPoStVerifyInfo) -> Result<(), Box<dyn StdError>>;
+    fn verify_post(&self, verify_info: &WindowPoStVerifyInfo) -> Result<bool, Box<dyn StdError>>;
 
     /// Verifies that two block headers provide proof of a consensus fault:
     /// - both headers mined by the same actor
@@ -229,6 +231,10 @@ pub trait Syscalls {
         }
         Ok(verified)
     }
+    fn verify_aggregate_seals(
+        &self,
+        aggregate: &fil_types::AggregateSealVerifyProofAndInfos,
+    ) -> Result<(), Box<dyn StdError>>;
 }
 
 /// Result of checking two headers for a consensus fault.
@@ -272,6 +278,7 @@ fn get_required_padding(
     (pad_pieces, PaddedPieceSize(sum))
 }
 
+/// Computes sector [Cid] from proof type and pieces for verification.
 pub fn compute_unsealed_sector_cid(
     proof_type: RegisteredSealProof,
     pieces: &[PieceInfo],

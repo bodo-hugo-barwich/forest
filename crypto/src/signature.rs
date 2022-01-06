@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::errors::Error;
@@ -7,9 +7,9 @@ use bls_signatures::{
     verify_messages, PublicKey as BlsPubKey, Serialize, Signature as BlsSignature,
 };
 use encoding::{blake2b_256, de, repr::*, ser, serde_bytes};
+use libsecp256k1::{recover, Message, RecoveryId, Signature as EcsdaSignature};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
-use secp256k1::{recover, Message, RecoveryId, Signature as EcsdaSignature};
 use std::borrow::Cow;
 
 /// BLS signature length in bytes.
@@ -22,7 +22,7 @@ pub const SECP_SIG_LEN: usize = 65;
 /// Secp256k1 Public key length in bytes.
 pub const SECP_PUB_LEN: usize = 65;
 
-/// Signature variants for Forest signatures
+/// Signature variants for Filecoin signatures.
 #[derive(
     Clone, Debug, PartialEq, FromPrimitive, Copy, Eq, Serialize_repr, Deserialize_repr, Hash,
 )]
@@ -32,15 +32,8 @@ pub enum SignatureType {
     BLS = 2,
 }
 
-// Just used for defaulting for block signatures, can be removed later if needed
-impl Default for SignatureType {
-    fn default() -> Self {
-        SignatureType::BLS
-    }
-}
-
-/// A cryptographic signature, represented in bytes, of any key protocol
-#[derive(Clone, Debug, PartialEq, Default, Eq, Hash)]
+/// A cryptographic signature, represented in bytes, of any key protocol.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature {
     sig_type: SignatureType,
     bytes: Vec<u8>,
@@ -82,7 +75,7 @@ impl<'de> de::Deserialize<'de> for Signature {
 }
 
 impl Signature {
-    /// Creates a SECP Signature given the raw bytes
+    /// Creates a SECP Signature given the raw bytes.
     pub fn new_secp256k1(bytes: Vec<u8>) -> Self {
         Self {
             sig_type: SignatureType::Secp256k1,
@@ -90,7 +83,7 @@ impl Signature {
         }
     }
 
-    /// Creates a BLS Signature given the raw bytes
+    /// Creates a BLS Signature given the raw bytes.
     pub fn new_bls(bytes: Vec<u8>) -> Self {
         Self {
             sig_type: SignatureType::BLS,
@@ -98,17 +91,17 @@ impl Signature {
         }
     }
 
-    /// Returns reference to signature bytes
+    /// Returns reference to signature bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    /// Returns reference to signature type
+    /// Returns [SignatureType] for the signature.
     pub fn signature_type(&self) -> SignatureType {
         self.sig_type
     }
 
-    /// Checks if a signature is valid given data and address
+    /// Checks if a signature is valid given data and address.
     pub fn verify(&self, data: &[u8], addr: &Address) -> Result<(), String> {
         match addr.protocol() {
             Protocol::BLS => verify_bls_sig(self.bytes(), data, addr),
@@ -118,7 +111,7 @@ impl Signature {
     }
 }
 
-/// Returns `String` error if a bls signature is invalid
+/// Returns `String` error if a bls signature is invalid.
 pub(crate) fn verify_bls_sig(signature: &[u8], data: &[u8], addr: &Address) -> Result<(), String> {
     let pub_k = addr.payload_bytes();
 
@@ -139,7 +132,7 @@ pub(crate) fn verify_bls_sig(signature: &[u8], data: &[u8], addr: &Address) -> R
     }
 }
 
-/// Returns `String` error if a secp256k1 signature is invalid
+/// Returns `String` error if a secp256k1 signature is invalid.
 fn verify_secp256k1_sig(signature: &[u8], data: &[u8], addr: &Address) -> Result<(), String> {
     if signature.len() != SECP_SIG_LEN {
         return Err(format!(
@@ -163,7 +156,7 @@ fn verify_secp256k1_sig(signature: &[u8], data: &[u8], addr: &Address) -> Result
         Err("Secp signature verification failed".to_owned())
     }
 }
-/// Aggregates and verifies bls signatures collectively
+/// Aggregates and verifies bls signatures collectively.
 pub fn verify_bls_aggregate(data: &[&[u8]], pub_keys: &[&[u8]], aggregate_sig: &Signature) -> bool {
     // If the number of public keys and data does not match, then return false
     if data.len() != pub_keys.len() {
@@ -194,13 +187,13 @@ pub fn verify_bls_aggregate(data: &[&[u8]], pub_keys: &[&[u8]], aggregate_sig: &
 pub fn ecrecover(hash: &[u8; 32], signature: &[u8; SECP_SIG_LEN]) -> Result<Address, Error> {
     // generate types to recover key from
     let rec_id = RecoveryId::parse(signature[64])?;
-    let message = Message::parse(&hash);
+    let message = Message::parse(hash);
 
     // Signature value without recovery byte
     let mut s = [0u8; 64];
     s.clone_from_slice(signature[..64].as_ref());
     // generate Signature
-    let sig = EcsdaSignature::parse(&s);
+    let sig = EcsdaSignature::parse_standard(&s)?;
 
     let key = recover(&message, &sig, &rec_id)?;
     let ret = key.serialize();
@@ -212,9 +205,9 @@ pub fn ecrecover(hash: &[u8; 32], signature: &[u8; SECP_SIG_LEN]) -> Result<Addr
 mod tests {
     use super::*;
     use bls_signatures::{PrivateKey, Serialize, Signature as BlsSignature};
+    use libsecp256k1::{sign, PublicKey, SecretKey};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
-    use secp256k1::{sign, PublicKey, SecretKey};
 
     #[test]
     fn bls_agg_verify() {
@@ -325,9 +318,7 @@ pub mod json {
         where
             S: Serializer,
         {
-            v.as_ref()
-                .map(|s| SignatureJsonRef(s))
-                .serialize(serializer)
+            v.as_ref().map(SignatureJsonRef).serialize(serializer)
         }
 
         pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Signature>, D::Error>
@@ -350,7 +341,7 @@ pub mod json {
             Secp256k1,
         }
 
-        #[derive(Serialize, Deserialize)]
+        #[derive(Debug, Serialize, Deserialize)]
         #[serde(transparent)]
         pub struct SignatureTypeJson(#[serde(with = "self")] pub SignatureType);
 

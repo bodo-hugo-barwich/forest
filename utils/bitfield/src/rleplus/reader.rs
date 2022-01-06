@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::Result;
@@ -89,7 +89,12 @@ impl<'a> BitReader<'a> {
             // if the most significant bit is a 0, we've
             // reached the end of the varint
             if byte & 0x80 == 0 {
-                return Ok(len);
+                if i == 0 || byte != 0 {
+                    // only the first byte can be zero in a varint
+                    return Ok(len);
+                }
+                // not minimally encoded
+                break;
             }
         }
 
@@ -146,7 +151,7 @@ mod tests {
 
     #[test]
     fn read_len() {
-        let bytes = &[0b0_001010_1, 0b110_10111, 0b01100_111, 0b00110010];
+        let bytes = &[0b0001_0101, 0b1101_0111, 0b0110_0111, 0b00110010];
         let mut reader = BitReader::new(bytes);
 
         assert_eq!(reader.read_len().unwrap(), Some(1)); // prefix: 1

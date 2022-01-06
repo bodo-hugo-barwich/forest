@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 mod state;
@@ -6,10 +6,7 @@ mod types;
 
 pub use self::state::{LaneState, Merge, State};
 pub use self::types::*;
-use crate::{
-    check_empty_params, resolve_to_id_addr, ActorDowncast, ACCOUNT_ACTOR_CODE_ID,
-    INIT_ACTOR_CODE_ID,
-};
+use crate::{resolve_to_id_addr, ActorDowncast, ACCOUNT_ACTOR_CODE_ID, INIT_ACTOR_CODE_ID};
 use address::Address;
 use ipld_amt::Amt;
 use ipld_blockstore::BlockStore;
@@ -25,7 +22,7 @@ use vm::{
 // TODO rename to actor exit code to be used ambiguously (requires new releases)
 use vm::ExitCode::ErrTooManyProveCommits as ErrChannelStateUpdateAfterSettled;
 
-// * Updated to specs-actors commit: e195950ba98adb8ce362030356bf4a3809b7ec77 (v2.3.2)
+// * Updated to specs-actors commit: f47f461b0588e9f0c20c999f6f129c85d669a7aa (v3.0.2)
 
 /// Payment Channel actor methods available
 #[derive(FromPrimitive)]
@@ -55,9 +52,11 @@ impl Actor {
 
         let from = Self::resolve_account(rt, &params.from)?;
 
-        let empty_arr_cid = Amt::<(), _>::new(rt.store()).flush().map_err(|e| {
-            e.downcast_default(ExitCode::ErrIllegalState, "failed to create empty AMT")
-        })?;
+        let empty_arr_cid = Amt::<(), _>::new_with_bit_width(rt.store(), LANE_STATES_AMT_BITWIDTH)
+            .flush()
+            .map_err(|e| {
+                e.downcast_default(ExitCode::ErrIllegalState, "failed to create empty AMT")
+            })?;
 
         rt.create(&State::new(from, to, empty_arr_cid))?;
         Ok(())
@@ -137,7 +136,7 @@ impl Actor {
             .map_err(|e| ActorError::from(e).wrap("failed to serialized SignedVoucher"))?;
 
         // Validate signature
-        rt.verify_signature(&sig, &signer, &sv_bz).map_err(|e| {
+        rt.verify_signature(sig, &signer, &sv_bz).map_err(|e| {
             e.downcast_default(ExitCode::ErrIllegalArgument, "voucher signature invalid")
         })?;
 
@@ -333,16 +332,16 @@ impl Actor {
 #[inline]
 fn find_lane<'a, BS>(
     ls: &'a Amt<LaneState, BS>,
-    id: u64,
+    id: usize,
 ) -> Result<Option<&'a LaneState>, ActorError>
 where
     BS: BlockStore,
 {
-    if id > MAX_LANE as u64 {
+    if id > MAX_LANE as usize {
         return Err(actor_error!(ErrIllegalArgument; "maximum lane ID is 2^63-1"));
     }
 
-    ls.get(id).map_err(|e| {
+    ls.get(id as usize).map_err(|e| {
         e.downcast_default(
             ExitCode::ErrIllegalState,
             format!("failed to load lane {}", id),
@@ -370,12 +369,10 @@ impl ActorCode for Actor {
                 Ok(Serialized::default())
             }
             Some(Method::Settle) => {
-                check_empty_params(params)?;
                 Self::settle(rt)?;
                 Ok(Serialized::default())
             }
             Some(Method::Collect) => {
-                check_empty_params(params)?;
                 Self::collect(rt)?;
                 Ok(Serialized::default())
             }

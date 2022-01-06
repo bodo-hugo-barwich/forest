@@ -1,10 +1,10 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use encoding::repr::*;
 use num_derive::FromPrimitive;
 
-/// ExitCode defines the exit code from the VM execution
+/// ExitCode defines the exit code from the VM execution.
 #[repr(u64)]
 #[derive(PartialEq, Eq, Debug, Clone, Copy, FromPrimitive, Serialize_repr, Deserialize_repr)]
 pub enum ExitCode {

@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use address::Address;
@@ -21,6 +21,7 @@ use vm::{actor_error, ActorError, ExitCode, MethodNum, Serialized, TokenAmount};
 pub struct MockRuntime {
     pub epoch: ChainEpoch,
     pub miner: Address,
+    pub base_fee: TokenAmount,
     pub id_addresses: HashMap<Address, Address>,
     pub actor_code_cids: HashMap<Address, Cid>,
     pub new_actor_addr: Option<Address>,
@@ -60,6 +61,7 @@ impl Default for MockRuntime {
         Self {
             epoch: Default::default(),
             miner: Address::new_id(0),
+            base_fee: Default::default(),
             id_addresses: Default::default(),
             actor_code_cids: Default::default(),
             new_actor_addr: Default::default(),
@@ -173,7 +175,7 @@ impl MockRuntime {
 
     #[allow(dead_code)]
     pub fn expect_validate_caller_addr(&mut self, addr: Vec<Address>) {
-        assert!(addr.len() > 0, "addrs must be non-empty");
+        assert!(!addr.is_empty(), "addrs must be non-empty");
         self.expect_validate_caller_addr = Some(addr);
     }
 
@@ -201,8 +203,8 @@ impl MockRuntime {
             block_header_1: h1,
             block_header_2: h2,
             block_header_extra: extra,
-            fault: fault,
-            exit_code: exit_code,
+            fault,
+            exit_code,
         });
     }
 
@@ -213,7 +215,7 @@ impl MockRuntime {
 
     #[allow(dead_code)]
     pub fn expect_validate_caller_type(&mut self, types: Vec<Cid>) {
-        assert!(types.len() > 0, "addrs must be non-empty");
+        assert!(!types.is_empty(), "addrs must be non-empty");
         self.expect_validate_caller_type = Some(types);
     }
 
@@ -234,7 +236,7 @@ impl MockRuntime {
         params: &Serialized,
     ) -> Result<Serialized, ActorError> {
         self.in_call = true;
-        let prev_state = self.state.clone();
+        let prev_state = self.state;
         let res = forest_actor::invoke_code(to_code, self, method_num, params)
             .unwrap_or_else(|| Err(actor_error!(SysErrForbidden, "invalid method id")));
 
@@ -242,7 +244,7 @@ impl MockRuntime {
             self.state = prev_state;
         }
         self.in_call = false;
-        return res;
+        res
     }
     pub fn verify(&mut self) {
         assert!(
@@ -345,7 +347,7 @@ impl MockRuntime {
     #[allow(dead_code)]
     pub fn set_caller(&mut self, code_id: Cid, address: Address) {
         self.caller = address;
-        self.caller_type = code_id.clone();
+        self.caller_type = code_id;
         self.actor_code_cids.insert(address, code_id);
     }
 
@@ -405,7 +407,7 @@ impl Runtime<MemoryDB> for MockRuntime {
 
         let addrs: Vec<Address> = addresses.into_iter().cloned().collect();
 
-        self.check_argument(addrs.len() > 0, "addrs must be non-empty".to_owned())?;
+        self.check_argument(!addrs.is_empty(), "addrs must be non-empty".to_owned())?;
 
         assert!(
             self.expect_validate_caller_addr.is_some(),
@@ -437,7 +439,7 @@ impl Runtime<MemoryDB> for MockRuntime {
         self.require_in_call();
         let types: Vec<Cid> = types.into_iter().cloned().collect();
 
-        self.check_argument(types.len() > 0, "types must be non-empty".to_owned())?;
+        self.check_argument(!types.is_empty(), "types must be non-empty".to_owned())?;
 
         assert!(
             self.expect_validate_caller_type.is_some(),
@@ -473,7 +475,7 @@ impl Runtime<MemoryDB> for MockRuntime {
     fn resolve_address(&self, address: &Address) -> Result<Option<Address>, ActorError> {
         self.require_in_call();
         if address.protocol() == address::Protocol::ID {
-            return Ok(Some(address.clone()));
+            return Ok(Some(*address));
         }
 
         Ok(self.id_addresses.get(&address).cloned())
@@ -504,7 +506,7 @@ impl Runtime<MemoryDB> for MockRuntime {
     }
 
     fn create<C: Cbor>(&mut self, obj: &C) -> Result<(), ActorError> {
-        if self.state.is_some() == true {
+        if self.state.is_some() {
             return Err(actor_error!(SysErrIllegalActor; "state already constructed"));
         }
         self.state = Some(self.store.put(obj, Blake2b256).unwrap());
@@ -562,7 +564,9 @@ impl Runtime<MemoryDB> for MockRuntime {
 
         let expected_msg = self.expect_sends.pop_front().unwrap();
 
-        assert!(expected_msg.to == to && expected_msg.method == method && expected_msg.params == params && expected_msg.value == value, "expectedMessage being sent does not match expectation.\nMessage -\t to: {:?} method: {:?} value: {:?} params: {:?}\nExpected -\t {:?}", to, method, value, params, self.expect_sends[0]);
+        assert!(expected_msg.to == to && expected_msg.method == method && expected_msg.params == params && expected_msg.value == value,
+            "expectedMessage being sent does not match expectation.\nMessage -\t to: {:?} method: {:?} value: {:?} params: {:?}\nExpected -\t {:?}",
+            to, method, value, params, expected_msg);
 
         if value > self.balance {
             return Err(actor_error!(SysErrSenderStateInvalid;
@@ -573,22 +577,19 @@ impl Runtime<MemoryDB> for MockRuntime {
         self.balance -= value;
 
         match expected_msg.exit_code {
-            ExitCode::Ok => return Ok(expected_msg.send_return),
-            x => {
-                return Err(ActorError::new(x, "Expected message Fail".to_string()));
-            }
+            ExitCode::Ok => Ok(expected_msg.send_return),
+            x => Err(ActorError::new(x, "Expected message Fail".to_string())),
         }
     }
 
     fn new_actor_address(&mut self) -> Result<Address, ActorError> {
         self.require_in_call();
-        let ret = self
+        let ret = *self
             .new_actor_addr
             .as_ref()
-            .expect("unexpected call to new actor address")
-            .clone();
+            .expect("unexpected call to new actor address");
         self.new_actor_addr = None;
-        return Ok(ret);
+        Ok(ret)
     }
 
     fn create_actor(&mut self, code_id: Cid, address: &Address) -> Result<(), ActorError> {
@@ -631,6 +632,10 @@ impl Runtime<MemoryDB> for MockRuntime {
     fn charge_gas(&mut self, _: &'static str, _: i64) -> Result<(), ActorError> {
         // TODO implement functionality if needed for testing
         Ok(())
+    }
+
+    fn base_fee(&self) -> &TokenAmount {
+        &self.base_fee
     }
 }
 
@@ -729,7 +734,7 @@ impl Syscalls for MockRuntime {
         }
         Ok(())
     }
-    fn verify_post(&self, post: &WindowPoStVerifyInfo) -> Result<(), Box<dyn StdError>> {
+    fn verify_post(&self, post: &WindowPoStVerifyInfo) -> Result<bool, Box<dyn StdError>> {
         let exp = self.expect_verify_post.replace(None).ok_or(Box::new(
             actor_error!(ErrIllegalState; "Unexpected syscall to verify PoSt"),
         ))?;
@@ -745,7 +750,7 @@ impl Syscalls for MockRuntime {
                 "Expected Failure".to_string(),
             )));
         }
-        Ok(())
+        Ok(true)
     }
     fn verify_consensus_fault(
         &self,
@@ -779,5 +784,12 @@ impl Syscalls for MockRuntime {
             )));
         }
         Ok(exp.fault)
+    }
+    fn verify_aggregate_seals(
+        &self,
+        _aggregate: &fil_types::AggregateSealVerifyProofAndInfos,
+    ) -> Result<(), Box<dyn StdError>> {
+        // TODO: Implement this if we need it. Currently don't have a need.
+        todo!()
     }
 }

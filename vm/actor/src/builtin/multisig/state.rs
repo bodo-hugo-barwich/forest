@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::{types::Transaction, TxnID};
@@ -31,6 +31,11 @@ pub struct State {
 }
 
 impl State {
+    /// Checks if `address` is in the list of signers
+    pub fn is_signer(&self, address: &Address) -> bool {
+        self.signers.contains(address)
+    }
+
     /// Set locked amount in multisig state.
     pub fn set_locked(
         &mut self,

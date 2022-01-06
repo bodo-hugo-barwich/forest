@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 #![cfg(feature = "tracking")]
@@ -9,6 +9,8 @@ use db::{Error, Store};
 use std::cell::RefCell;
 use std::error::Error as StdError;
 
+/// Stats for a [TrackingBlockStore] this indicates the amount of read and written data
+/// to the wrapped store.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct BSStats {
     /// Number of reads

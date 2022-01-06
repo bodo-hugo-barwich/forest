@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 #[macro_use]
@@ -8,21 +8,50 @@ use beacon::{BeaconPoint, BeaconSchedule, DrandBeacon, DrandConfig};
 use clock::ChainEpoch;
 use fil_types::NetworkVersion;
 use std::{error::Error, sync::Arc};
-
 mod drand;
 
-#[cfg(not(any(feature = "interopnet")))]
+#[cfg(feature = "mainnet")]
 mod mainnet;
-#[cfg(not(any(feature = "interopnet")))]
+#[cfg(feature = "mainnet")]
 pub use self::mainnet::*;
 
-#[cfg(feature = "interopnet")]
+#[cfg(feature = "conformance")]
+mod mainnet;
+#[cfg(feature = "conformace")]
+pub use self::mainnet::*;
+pub use crate::mainnet::*;
+
+#[cfg(all(
+    feature = "interopnet",
+    not(feature = "devnet"),
+    not(feature = "mainnet")
+))]
 mod interopnet;
-#[cfg(feature = "interopnet")]
+#[cfg(all(
+    feature = "interopnet",
+    not(feature = "devnet"),
+    not(feature = "mainnet")
+))]
 pub use self::interopnet::*;
 
+#[cfg(all(
+    feature = "devnet",
+    not(feature = "interopnet"),
+    not(feature = "mainnet")
+))]
+mod devnet;
+#[cfg(all(
+    feature = "devnet",
+    not(feature = "interopnet"),
+    not(feature = "mainnet")
+))]
+pub use self::devnet::*;
+
+/// Defines the different hard fork parameters.
 struct Upgrade {
+    /// When the hard fork will happen
     height: ChainEpoch,
+    /// The version of the fork
     network: NetworkVersion,
 }
 
@@ -31,7 +60,7 @@ struct DrandPoint<'a> {
     pub config: &'a DrandConfig<'a>,
 }
 
-const VERSION_SCHEDULE: [Upgrade; 9] = [
+const VERSION_SCHEDULE: [Upgrade; 14] = [
     Upgrade {
         height: UPGRADE_BREEZE_HEIGHT,
         network: NetworkVersion::V1,
@@ -68,9 +97,29 @@ const VERSION_SCHEDULE: [Upgrade; 9] = [
         height: UPGRADE_ORANGE_HEIGHT,
         network: NetworkVersion::V9,
     },
+    Upgrade {
+        height: UPGRADE_ACTORS_V3_HEIGHT,
+        network: NetworkVersion::V10,
+    },
+    Upgrade {
+        height: UPGRADE_NORWEGIAN_HEIGHT,
+        network: NetworkVersion::V11,
+    },
+    Upgrade {
+        height: UPGRADE_ACTORS_V4_HEIGHT,
+        network: NetworkVersion::V12,
+    },
+    Upgrade {
+        height: UPGRADE_HYPERDRIVE_HEIGHT,
+        network: NetworkVersion::V13,
+    },
+    Upgrade {
+        height: UPGRADE_ACTORS_V6_HEIGHT,
+        network: NetworkVersion::V14,
+    },
 ];
 
-/// Gets network version from epoch using default Mainnet schedule
+/// Gets network version from epoch using default Mainnet schedule.
 pub fn get_network_version_default(epoch: ChainEpoch) -> NetworkVersion {
     VERSION_SCHEDULE
         .iter()

@@ -1,13 +1,18 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use crate::{Randomness, RegisteredSealProof, SectorID, SectorNumber};
+use crate::{
+    ActorID, Randomness, RegisteredAggregateProof, RegisteredSealProof, SectorID, SectorNumber,
+};
 use cid::Cid;
 use clock::ChainEpoch;
 use encoding::{serde_bytes, tuple::*};
 use vm::DealID;
 
+/// Randomness used for Seal proofs.
 pub type SealRandomness = Randomness;
+
+/// Randomness used when verifying a seal proof. This is just a seed value.
 pub type InteractiveSealRandomness = Randomness;
 
 /// Information needed to verify a seal proof.
@@ -38,4 +43,25 @@ pub struct SealVerifyParams {
     pub deal_ids: Vec<DealID>,
     pub sector_num: SectorNumber,
     pub seal_rand_epoch: ChainEpoch,
+}
+
+/// Information needed to verify an aggregated seal proof.
+#[derive(Clone, Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
+pub struct AggregateSealVerifyInfo {
+    pub sector_number: SectorNumber,
+    pub randomness: SealRandomness,
+    pub interactive_randomness: InteractiveSealRandomness,
+
+    pub sealed_cid: Cid,   // Commr
+    pub unsealed_cid: Cid, // Commd
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
+pub struct AggregateSealVerifyProofAndInfos {
+    pub miner: ActorID,
+    pub seal_proof: RegisteredSealProof,
+    pub aggregate_proof: RegisteredAggregateProof,
+    #[serde(with = "serde_bytes")]
+    pub proof: Vec<u8>,
+    pub infos: Vec<AggregateSealVerifyInfo>,
 }

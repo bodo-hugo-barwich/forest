@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use serde::de::{self, SeqAccess, Visitor};
@@ -167,7 +167,7 @@ mod tests {
         struct BasicJson {
             #[serde(with = "go_vec_visitor")]
             ints: Vec<u8>,
-        };
+        }
 
         let null_json = r#"null"#;
         let BasicJson { ints } = from_str(null_json).unwrap();

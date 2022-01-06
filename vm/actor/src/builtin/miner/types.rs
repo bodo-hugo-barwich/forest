@@ -1,13 +1,15 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use crate::DealWeight;
+use crate::{smooth::FilterEstimate, DealWeight};
 use address::Address;
 use bitfield::UnvalidatedBitField;
 use cid::Cid;
 use clock::ChainEpoch;
 use encoding::{serde_bytes, tuple::*, BytesDe};
-use fil_types::{PoStProof, Randomness, RegisteredSealProof, SectorNumber};
+use fil_types::{
+    PoStProof, Randomness, RegisteredPoStProof, RegisteredSealProof, SectorNumber, StoragePower,
+};
 use num_bigint::bigint_ser;
 use vm::{DealID, TokenAmount};
 
@@ -23,7 +25,7 @@ pub struct MinerConstructorParams {
     pub owner: Address,
     pub worker: Address,
     pub control_addresses: Vec<Address>,
-    pub seal_proof_type: RegisteredSealProof,
+    pub window_post_proof_type: RegisteredPoStProof,
     #[serde(with = "serde_bytes")]
     pub peer_id: Vec<u8>,
     pub multi_addresses: Vec<BytesDe>,
@@ -36,8 +38,8 @@ pub struct CronEventPayload {
 
 #[derive(Debug)]
 pub struct PartitionKey {
-    pub deadline: u64,
-    pub partition: u64,
+    pub deadline: usize,
+    pub partition: usize,
 }
 
 #[derive(Serialize_tuple, Deserialize_tuple)]
@@ -67,12 +69,23 @@ pub struct ChangeMultiaddrsParams {
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct ConfirmSectorProofsParams {
     pub sectors: Vec<SectorNumber>,
+    pub reward_smoothed: FilterEstimate,
+    #[serde(with = "bigint_ser")]
+    pub reward_baseline_power: StoragePower,
+    pub quality_adj_power_smoothed: FilterEstimate,
+}
+#[derive(Serialize_tuple, Deserialize_tuple)]
+pub struct DeferredCronEventParams {
+    #[serde(with = "serde_bytes")]
+    pub event_payload: Vec<u8>,
+    pub reward_smoothed: FilterEstimate,
+    pub quality_adj_power_smoothed: FilterEstimate,
 }
 
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct PoStPartition {
     /// Partitions are numbered per-deadline, from zero.
-    pub index: u64,
+    pub index: usize,
     /// Sectors skipped while proving that weren't already declared faulty.
     pub skipped: UnvalidatedBitField,
 }
@@ -81,7 +94,7 @@ pub struct PoStPartition {
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct SubmitWindowedPoStParams {
     /// The deadline index which the submission targets.
-    pub deadline: u64,
+    pub deadline: usize,
     /// The partitions being proven.
     pub partitions: Vec<PoStPartition>,
     /// Array of proofs, one per distinct registered proof type present in the sectors being proven.
@@ -112,8 +125,8 @@ pub struct ExtendSectorExpirationParams {
 
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct ExpirationExtension {
-    pub deadline: u64,
-    pub partition: u64,
+    pub deadline: usize,
+    pub partition: usize,
     pub sectors: UnvalidatedBitField,
     pub new_expiration: ChainEpoch,
 }
@@ -125,8 +138,8 @@ pub struct TerminateSectorsParams {
 
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct TerminationDeclaration {
-    pub deadline: u64,
-    pub partition: u64,
+    pub deadline: usize,
+    pub partition: usize,
     pub sectors: UnvalidatedBitField,
 }
 
@@ -148,9 +161,9 @@ pub struct DeclareFaultsParams {
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct FaultDeclaration {
     /// The deadline to which the faulty sectors are assigned, in range [0..WPoStPeriodDeadlines)
-    pub deadline: u64,
+    pub deadline: usize,
     /// Partition index within the deadline containing the faulty sectors.
-    pub partition: u64,
+    pub partition: usize,
     /// Sectors in the partition being declared faulty.
     pub sectors: UnvalidatedBitField,
 }
@@ -163,16 +176,16 @@ pub struct DeclareFaultsRecoveredParams {
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct RecoveryDeclaration {
     /// The deadline to which the recovered sectors are assigned, in range [0..WPoStPeriodDeadlines)
-    pub deadline: u64,
+    pub deadline: usize,
     /// Partition index within the deadline containing the recovered sectors.
-    pub partition: u64,
+    pub partition: usize,
     /// Sectors in the partition being declared recovered.
     pub sectors: UnvalidatedBitField,
 }
 
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct CompactPartitionsParams {
-    pub deadline: u64,
+    pub deadline: usize,
     pub partitions: UnvalidatedBitField,
 }
 
@@ -197,6 +210,13 @@ pub struct WithdrawBalanceParams {
     pub amount_requested: TokenAmount,
 }
 
+#[derive(Serialize_tuple, Deserialize_tuple)]
+#[serde(transparent)]
+pub struct WithdrawBalanceReturn {
+    #[serde(with = "bigint_ser")]
+    pub amount_withdrawn: TokenAmount,
+}
+
 #[derive(Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct WorkerKeyChange {
     /// Must be an ID address
@@ -205,6 +225,11 @@ pub struct WorkerKeyChange {
 }
 
 pub type PreCommitSectorParams = SectorPreCommitInfo;
+
+#[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
+pub struct PreCommitSectorBatchParams {
+    pub sectors: Vec<SectorPreCommitInfo>,
+}
 
 #[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct SectorPreCommitInfo {
@@ -218,8 +243,8 @@ pub struct SectorPreCommitInfo {
     /// Whether to replace a "committed capacity" no-deal sector (requires non-empty DealIDs)
     pub replace_capacity: bool,
     /// The committed capacity sector to replace, and its deadline/partition location
-    pub replace_sector_deadline: u64,
-    pub replace_sector_partition: u64,
+    pub replace_sector_deadline: usize,
+    pub replace_sector_partition: usize,
     pub replace_sector_number: SectorNumber,
 }
 
@@ -273,7 +298,7 @@ pub struct SectorOnChainInfo {
     pub replaced_day_reward: TokenAmount,
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, PartialEq, Copy, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct Fault {
     pub miner: Address,
     pub fault: ChainEpoch,
@@ -286,4 +311,17 @@ pub struct ApplyRewardParams {
     pub reward: TokenAmount,
     #[serde(with = "bigint_ser")]
     pub penalty: TokenAmount,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy, Serialize_tuple, Deserialize_tuple)]
+pub struct DisputeWindowedPoStParams {
+    pub deadline: usize,
+    pub post_index: u64, // only one is allowed at a time to avoid loading too many sector infos.
+}
+
+#[derive(Debug, Serialize_tuple, Deserialize_tuple)]
+pub struct ProveCommitAggregateParams {
+    pub sector_numbers: UnvalidatedBitField,
+    #[serde(with = "serde_bytes")]
+    pub aggregate_proof: Vec<u8>,
 }

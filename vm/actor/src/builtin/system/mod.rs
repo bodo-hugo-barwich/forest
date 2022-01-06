@@ -1,7 +1,7 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use crate::{check_empty_params, SYSTEM_ACTOR_ADDR};
+use crate::SYSTEM_ACTOR_ADDR;
 
 use encoding::Cbor;
 use ipld_blockstore::BlockStore;
@@ -11,7 +11,7 @@ use runtime::{ActorCode, Runtime};
 use serde::{Deserialize, Serialize};
 use vm::{actor_error, ActorError, ExitCode, MethodNum, Serialized, METHOD_CONSTRUCTOR};
 
-// * Updated to specs-actors commit: e195950ba98adb8ce362030356bf4a3809b7ec77 (v2.3.2)
+// * Updated to specs-actors commit: 845089a6d2580e46055c24415a6c32ee688e5186 (v3.0.0)
 
 /// System actor methods.
 #[derive(FromPrimitive)]
@@ -46,7 +46,7 @@ impl ActorCode for Actor {
     fn invoke_method<BS, RT>(
         rt: &mut RT,
         method: MethodNum,
-        params: &Serialized,
+        _params: &Serialized,
     ) -> Result<Serialized, ActorError>
     where
         BS: BlockStore,
@@ -54,7 +54,6 @@ impl ActorCode for Actor {
     {
         match FromPrimitive::from_u64(method) {
             Some(Method::Constructor) => {
-                check_empty_params(params)?;
                 Self::constructor(rt)?;
                 Ok(Serialized::default())
             }

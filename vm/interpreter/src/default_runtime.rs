@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::gas_block_store::GasBlockStore;
@@ -7,7 +7,7 @@ use super::{CircSupplyCalc, LookbackStateGetter, Rand};
 use actor::{
     account, actorv0,
     actorv2::{self, ActorDowncast},
-    ActorVersion,
+    actorv3, actorv4, actorv5, actorv6, ActorVersion,
 };
 use address::{Address, Protocol};
 use blocks::BlockHeader;
@@ -15,7 +15,9 @@ use byteorder::{BigEndian, WriteBytesExt};
 use cid::{Cid, Code::Blake2b256};
 use clock::ChainEpoch;
 use crypto::{DomainSeparationTag, Signature};
-use fil_types::{verifier::ProofVerifier, DevnetParams, NetworkParams, NetworkVersion, Randomness};
+use fil_types::{
+    verifier::ProofVerifier, DefaultNetworkParams, NetworkParams, NetworkVersion, Randomness,
+};
 use fil_types::{PieceInfo, RegisteredSealProof, SealVerifyInfo, WindowPoStVerifyInfo};
 use forest_encoding::{blake2b_256, to_vec, Cbor};
 use ipld_blockstore::BlockStore;
@@ -38,6 +40,10 @@ use vm::{
     actor_error, ActorError, ActorState, ExitCode, MethodNum, Serialized, TokenAmount,
     EMPTY_ARR_CID, METHOD_SEND,
 };
+
+lazy_static! {
+    static ref NUM_CPUS: usize = num_cpus::get();
+}
 
 /// Max runtime call depth
 const MAX_CALL_DEPTH: u64 = 4096;
@@ -75,10 +81,10 @@ impl MessageInfo for VMMsg {
 }
 
 /// Implementation of the Runtime trait.
-pub struct DefaultRuntime<'db, 'vm, BS, R, C, LB, V, P = DevnetParams> {
+pub struct DefaultRuntime<'db, 'vm, BS, R, C, LB, V, P = DefaultNetworkParams> {
     version: NetworkVersion,
-    state: &'vm mut StateTree<'db, BS>,
-    store: GasBlockStore<'db, BS>,
+    state: Rc<RefCell<&'vm mut StateTree<'db, BS>>>,
+    store: Rc<GasBlockStore<'db, BS>>,
     gas_tracker: Rc<RefCell<GasTracker>>,
     vm_msg: VMMsg,
     epoch: ChainEpoch,
@@ -88,13 +94,15 @@ pub struct DefaultRuntime<'db, 'vm, BS, R, C, LB, V, P = DevnetParams> {
 
     depth: u64,
     num_actors_created: u64,
-    price_list: PriceList,
+    price_list: Rc<PriceList>,
     rand: &'vm R,
     caller_validated: bool,
     allow_internal: bool,
     registered_actors: &'vm HashSet<Cid>,
     circ_supply_calc: &'vm C,
     lb_state: &'vm LB,
+
+    base_fee: TokenAmount,
 
     verifier: PhantomData<V>,
     params: PhantomData<P>,
@@ -116,6 +124,7 @@ where
         state: &'vm mut StateTree<'db, BS>,
         store: &'db BS,
         gas_used: i64,
+        base_fee: TokenAmount,
         message: &UnsignedMessage,
         epoch: ChainEpoch,
         origin: Address,
@@ -136,7 +145,7 @@ where
         };
 
         let caller_id = state
-            .lookup_id(&message.from())
+            .lookup_id(message.from())
             .map_err(|e| e.downcast_fatal("failed to lookup id"))?
             .ok_or_else(|| {
                 actor_error!(SysErrInvalidReceiver, "resolve msg from address failed")
@@ -146,7 +155,7 @@ where
             *message.to()
         } else {
             state
-                .lookup_id(&message.to())
+                .lookup_id(message.to())
                 .map_err(|e| e.downcast_fatal("failed to lookup id"))?
                 // * Go implementation changes this to undef address. To avoid using optional
                 // * value here, the non-id address is kept here (should never be used)
@@ -161,8 +170,8 @@ where
 
         Ok(DefaultRuntime {
             version,
-            state,
-            store: gas_block_store,
+            state: Rc::new(RefCell::new(state)),
+            store: Rc::new(gas_block_store),
             gas_tracker,
             vm_msg,
             epoch,
@@ -170,11 +179,12 @@ where
             origin_nonce,
             depth,
             num_actors_created,
-            price_list,
+            price_list: Rc::new(price_list),
             rand,
             registered_actors,
             circ_supply_calc,
             lb_state,
+            base_fee,
             allow_internal: true,
             caller_validated: false,
             params: PhantomData,
@@ -182,13 +192,13 @@ where
         })
     }
 
-    /// Adds to amount of used
+    /// Adds to amount of used.
     /// * Will borrow gas tracker RefCell, do not call if any reference to this exists
     pub fn charge_gas(&mut self, gas: GasCharge) -> Result<(), ActorError> {
         self.gas_tracker.borrow_mut().charge_gas(gas)
     }
 
-    /// Returns gas used by runtime
+    /// Returns gas used by runtime.
     /// * Will borrow gas tracker RefCell, do not call if a mutable reference exists
     pub fn gas_used(&self) -> i64 {
         self.gas_tracker.borrow().gas_used()
@@ -198,26 +208,28 @@ where
         self.gas_tracker.borrow().gas_available()
     }
 
-    /// Returns the price list for gas charges within the runtime
+    /// Returns the price list for gas charges within the runtime.
     pub fn price_list(&self) -> &PriceList {
         &self.price_list
     }
 
-    /// Get the balance of a particular Actor from their Address
+    /// Get the balance of a particular Actor from their Address.
     fn get_balance(&self, addr: &Address) -> Result<BigInt, ActorError> {
         Ok(self
             .state
-            .get_actor(&addr)
+            .borrow()
+            .get_actor(addr)
             .map_err(|e| e.downcast_fatal("failed to get actor in get balance"))?
             .map(|act| act.balance)
             .unwrap_or_default())
     }
 
-    /// Update the state Cid of the Message receiver
+    /// Update the state Cid of the Message receiver.
     fn state_commit(&mut self, old_h: &Cid, new_h: Cid) -> Result<(), ActorError> {
         let to_addr = *self.message().receiver();
         let mut actor = self
             .state
+            .borrow()
             .get_actor(&to_addr)
             .map_err(|e| e.downcast_fatal("failed to get actor to commit state"))?
             .ok_or_else(|| actor_error!(fatal("failed to get actor to commit state")))?;
@@ -229,6 +241,7 @@ where
         }
         actor.state = new_h;
         self.state
+            .borrow_mut()
             .set_actor(&to_addr, actor)
             .map_err(|e| e.downcast_fatal("failed to set actor in state_commit"))?;
 
@@ -288,23 +301,24 @@ where
 
         // snapshot state tree
         self.state
+            .borrow_mut()
             .snapshot()
             .map_err(|e| actor_error!(fatal("failed to create snapshot: {}", e)))?;
 
         let send_res = self.send(&msg, None);
 
         let ret = send_res.map_err(|e| {
-            if let Err(e) = self.state.revert_to_snapshot() {
+            if let Err(e) = self.state.borrow_mut().revert_to_snapshot() {
                 actor_error!(fatal("failed to revert snapshot: {}", e))
             } else {
                 e
             }
         });
-        if let Err(e) = self.state.clear_snapshot() {
+        if let Err(e) = self.state.borrow_mut().clear_snapshot() {
             actor_error!(fatal("failed to clear snapshot: {}", e));
         }
 
-        Ok(ret?)
+        ret
     }
 
     /// Shared logic between the DefaultRuntime and the Interpreter.
@@ -323,7 +337,6 @@ where
         let prev_val = self.caller_validated;
         let prev_depth = self.depth;
         let prev_msg = self.vm_msg.clone();
-
         let res = self.execute_send(msg, gas_cost);
 
         // Reset values back to their values before the call
@@ -344,13 +357,15 @@ where
     ) -> Result<Serialized, ActorError> {
         // * Following logic would be called in the go runtime initialization.
         // * Since We reuse the runtime, all of these things need to happen on each call
-        self.caller_validated = false;
+
+        // TODO: fix this following line?
+        // self.caller_validated = false;
         self.depth += 1;
         if self.depth > MAX_CALL_DEPTH && self.network_version() >= NetworkVersion::V6 {
-            return Err(actor_error!(
+            return Err(actor_error!(recovered(
                 SysErrForbidden,
                 "message execution exceeds call depth"
-            ));
+            )));
         }
 
         let caller = self.resolve_address(msg.from())?.ok_or_else(|| {
@@ -368,48 +383,76 @@ where
             msg.to
         };
 
-        self.vm_msg = VMMsg {
-            caller,
-            receiver,
-            value_received: msg.value().clone(),
+        let mut new_rt = DefaultRuntime {
+            version: self.version,
+            state: Rc::clone(&self.state),
+            store: Rc::clone(&self.store),
+            depth: self.depth + 1,
+            num_actors_created: self.num_actors_created,
+            price_list: Rc::clone(&self.price_list),
+            rand: self.rand,
+            caller_validated: false,
+            allow_internal: self.allow_internal,
+            registered_actors: self.registered_actors,
+            circ_supply_calc: self.circ_supply_calc,
+            lb_state: self.lb_state,
+            base_fee: self.base_fee.clone(),
+            verifier: self.verifier,
+            vm_msg: VMMsg {
+                caller,
+                receiver,
+                value_received: msg.value().clone(),
+            },
+            epoch: self.epoch,
+            origin: self.origin,
+            gas_tracker: Rc::clone(&self.gas_tracker),
+            origin_nonce: self.origin_nonce,
+            params: self.params,
         };
 
         // * End of logic that is performed on go runtime initialization
 
         if let Some(cost) = gas_cost {
-            self.charge_gas(cost)?;
+            new_rt.charge_gas(cost)?;
         }
 
-        let to_actor = match self
-            .state
+        let maybe_to_actor = (*new_rt.state)
+            .borrow()
             .get_actor(msg.to())
-            .map_err(|e| e.downcast_fatal("failed to get actor"))?
-        {
+            .map_err(|e| e.downcast_fatal("failed to get actor"))?;
+
+        let to_actor = match maybe_to_actor {
             Some(act) => act,
             None => {
                 // Try to create actor if not exist
-                let (to_actor, id_addr) = self.try_create_account_actor(msg.to())?;
-                if self.network_version() > NetworkVersion::V3 {
+                let (to_actor, id_addr) = new_rt.try_create_account_actor(msg.to())?;
+                if new_rt.network_version() > NetworkVersion::V3 {
                     // Update the receiver to the created ID address
-                    self.vm_msg.receiver = id_addr;
+                    new_rt.vm_msg.receiver = id_addr;
                 }
                 to_actor
             }
         };
 
-        self.charge_gas(
-            self.price_list()
+        new_rt.charge_gas(
+            new_rt
+                .price_list()
                 .on_method_invocation(msg.value(), msg.method_num()),
         )?;
 
         if !msg.value().is_zero() {
-            transfer(self.state, &msg.from(), &msg.to(), &msg.value())
-                .map_err(|e| e.wrap("failed to transfer funds"))?;
+            transfer(
+                *new_rt.state.borrow_mut(),
+                msg.from(),
+                msg.to(),
+                msg.value(),
+            )
+            .map_err(|e| e.wrap("failed to transfer funds"))?;
         }
 
         if msg.method_num() != METHOD_SEND {
-            self.charge_gas(ACTOR_EXEC_GAS)?;
-            return self.invoke(to_actor.code, msg.method_num(), msg.params(), msg.to());
+            new_rt.charge_gas(ACTOR_EXEC_GAS)?;
+            return new_rt.invoke(to_actor.code, msg.method_num(), msg.params(), msg.to());
         }
 
         Ok(Serialized::default())
@@ -423,10 +466,16 @@ where
         params: &Serialized,
         to: &Address,
     ) -> Result<Serialized, ActorError> {
+        let actor_version = actor::ActorVersion::from(self.network_version());
+
         let ret = if let Some(ret) = {
-            match actor::ActorVersion::from(self.network_version()) {
+            match actor_version {
                 ActorVersion::V0 => actorv0::invoke_code(&code, self, method_num, params),
                 ActorVersion::V2 => actorv2::invoke_code(&code, self, method_num, params),
+                ActorVersion::V3 => actorv3::invoke_code(&code, self, method_num, params),
+                ActorVersion::V4 => actorv4::invoke_code(&code, self, method_num, params),
+                ActorVersion::V5 => actorv5::invoke_code(&code, self, method_num, params),
+                ActorVersion::V6 => actorv6::invoke_code(&code, self, method_num, params),
             }
         } {
             ret
@@ -435,8 +484,9 @@ where
         } else {
             Err(actor_error!(
                 SysErrIllegalActor,
-                "no code for actor at address {}",
-                to
+                "no code for actor at address {} with code {}",
+                to,
+                code
             ))
         }?;
 
@@ -456,15 +506,22 @@ where
     ) -> Result<(ActorState, Address), ActorError> {
         self.charge_gas(self.price_list().on_create_actor())?;
 
-        let addr_id = self
-            .state
+        if addr.is_bls_zero_address() && self.network_version() >= NetworkVersion::V10 {
+            return Err(
+                actor_error!(ErrIllegalArgument; "cannot create the bls zero address actor"),
+            );
+        }
+
+        let addr_id = (*self.state)
+            .borrow_mut()
             .register_new_address(addr)
             .map_err(|e| e.downcast_fatal("failed to register new address"))?;
 
         let version = ActorVersion::from(self.network_version());
         let act = make_actor(addr, version)?;
 
-        self.state
+        (*self.state)
+            .borrow_mut()
             .set_actor(&addr_id, act)
             .map_err(|e| e.downcast_fatal("failed to set actor"))?;
 
@@ -486,6 +543,7 @@ where
 
         let act = self
             .state
+            .borrow()
             .get_actor(&addr_id)
             .map_err(|e| e.downcast_fatal("failed to get actor"))?
             .ok_or_else(|| actor_error!(fatal("failed to retrieve created actor state")))?;
@@ -494,17 +552,13 @@ where
     }
 
     fn verify_block_signature(&self, bh: &BlockHeader) -> Result<(), Box<dyn StdError>> {
-        let worker_addr = self.worker_key_at_lookback(bh.epoch(), bh.miner_address())?;
+        let worker_addr = self.worker_key_at_lookback(bh.epoch())?;
 
         bh.check_block_signature(&worker_addr)?;
         Ok(())
     }
 
-    fn worker_key_at_lookback(
-        &self,
-        height: ChainEpoch,
-        address: &Address,
-    ) -> Result<Address, Box<dyn StdError>> {
+    fn worker_key_at_lookback(&self, height: ChainEpoch) -> Result<Address, Box<dyn StdError>> {
         if self.network_version() >= NetworkVersion::V7
             && height < self.epoch - actor::CHAIN_FINALITY
         {
@@ -519,13 +573,13 @@ where
         let actor = lb_state
             // * @austinabell: Yes, this is intentional (should be updated with v3 actors though)
             .get_actor(self.vm_msg.receiver())?
-            .ok_or_else(|| format!("actor not found {:?}", address))?;
+            .ok_or_else(|| format!("actor not found {:?}", self.vm_msg.receiver()))?;
 
-        let ms = actor::miner::State::load(self.store(), &actor)?;
+        let ms = actor::miner::State::load(self.store.as_ref(), &actor)?;
 
-        let info = ms.info(&self.store)?;
+        let worker = ms.info(self.store.as_ref())?.worker;
 
-        resolve_to_key_addr(&self.state, &self.store, &info.worker)
+        resolve_to_key_addr(&self.state.borrow(), self.store.as_ref(), &worker)
     }
 }
 
@@ -561,7 +615,7 @@ where
 
         // Check if theres is at least one match
         if !addresses.into_iter().any(|a| a == imm) {
-            return Err(actor_error!(SysErrForbidden;
+            return Err(actor_error!(ErrForbidden;
                 "caller {} is not one of supported", self.message().caller()
             ));
         }
@@ -590,14 +644,16 @@ where
 
     fn resolve_address(&self, address: &Address) -> Result<Option<Address>, ActorError> {
         self.state
-            .lookup_id(&address)
+            .borrow()
+            .lookup_id(address)
             .map_err(|e| e.downcast_fatal("failed to look up id"))
     }
 
     fn get_actor_code_cid(&self, addr: &Address) -> Result<Option<Cid>, ActorError> {
         Ok(self
             .state
-            .get_actor(&addr)
+            .borrow()
+            .get_actor(addr)
             .map_err(|e| e.downcast_fatal("failed to get actor"))?
             .map(|act| act.code))
     }
@@ -608,12 +664,17 @@ where
         rand_epoch: ChainEpoch,
         entropy: &[u8],
     ) -> Result<Randomness, ActorError> {
-        let r = self
-            .rand
-            .get_chain_randomness(personalization, rand_epoch, entropy)
-            .map_err(|e| e.downcast_fatal("could not get randomness"))?;
+        let r = if rand_epoch > networks::UPGRADE_HYPERDRIVE_HEIGHT {
+            self.rand
+                .get_chain_randomness_v2(personalization, rand_epoch, entropy)
+                .map_err(|e| e.downcast_fatal("could not get randomness"))?
+        } else {
+            self.rand
+                .get_chain_randomness_v1(personalization, rand_epoch, entropy)
+                .map_err(|e| e.downcast_fatal("could not get randomness"))?
+        };
 
-        Ok(Randomness(r))
+        Ok(Randomness(r.to_vec()))
     }
 
     fn get_randomness_from_beacon(
@@ -622,12 +683,20 @@ where
         rand_epoch: ChainEpoch,
         entropy: &[u8],
     ) -> Result<Randomness, ActorError> {
-        let r = self
-            .rand
-            .get_beacon_randomness(personalization, rand_epoch, entropy)
-            .map_err(|e| e.downcast_fatal("could not get randomness"))?;
-
-        Ok(Randomness(r))
+        let r = if rand_epoch >= networks::UPGRADE_ACTORS_V6_HEIGHT {
+            self.rand
+                .get_beacon_randomness_v3(personalization, rand_epoch, entropy)
+                .map_err(|e| e.downcast_fatal("could not get randomness"))?
+        } else if rand_epoch > networks::UPGRADE_HYPERDRIVE_HEIGHT {
+            self.rand
+                .get_beacon_randomness_v2(personalization, rand_epoch, entropy)
+                .map_err(|e| e.downcast_fatal("could not get randomness"))?
+        } else {
+            self.rand
+                .get_beacon_randomness_v1(personalization, rand_epoch, entropy)
+                .map_err(|e| e.downcast_fatal("could not get randomness"))?
+        };
+        Ok(Randomness(r.to_vec()))
     }
 
     fn create<C: Cbor>(&mut self, obj: &C) -> Result<(), ActorError> {
@@ -639,6 +708,7 @@ where
     fn state<C: Cbor>(&self) -> Result<C, ActorError> {
         let actor = self
             .state
+            .borrow()
             .get_actor(self.message().receiver())
             .map_err(|e| {
                 e.downcast_default(
@@ -666,6 +736,7 @@ where
         // get actor
         let act = self
             .state
+            .borrow()
             .get_actor(self.message().receiver())
             .map_err(|e| {
                 e.downcast_default(
@@ -710,7 +781,10 @@ where
         value: TokenAmount,
     ) -> Result<Serialized, ActorError> {
         if !self.allow_internal {
-            return Err(actor_error!(SysErrIllegalActor; "runtime.send() is not allowed"));
+            return Err(actor_error!(recovered(
+                SysErrIllegalActor,
+                "runtime.send() is not allowed"
+            )));
         }
 
         let ret = self
@@ -727,7 +801,7 @@ where
     }
     fn new_actor_address(&mut self) -> Result<Address, ActorError> {
         // ! Go implementation doesn't handle the error for some reason here and will panic
-        let oa = resolve_to_key_addr(self.state, self.store.store, &self.origin)
+        let oa = resolve_to_key_addr(&self.state.borrow(), self.store.store, &self.origin)
             .map_err(|e| e.downcast_fatal("failed to resolve key addr"))?;
         let mut b = to_vec(&oa).map_err(|e| {
             actor_error!(fatal(
@@ -752,7 +826,20 @@ where
         // * Lotus does undef address check here, should be impossible to hit.
         // * if diff with `SysErrIllegalArgument` check here
         if !actor::is_builtin_actor(&code_id) {
-            return Err(actor_error!(SysErrIllegalArgument; "Can only create built-in actors."));
+            return Err(
+                actor_error!(SysErrIllegalArgument; "Can only create built-in actors. code={}", code_id),
+            );
+        }
+
+        // Unwrapping is safe because we are priorly testing if it's a builtin
+        let version = actor::actor_version(&code_id).unwrap();
+        let support = ActorVersion::from(self.network_version());
+        if version != support {
+            let msg = format!(
+                "actor {} is a version {} actor; chain only supports actor version {} at height {} and nver {}",
+                &code_id, version, support, self.curr_epoch(), self.network_version()
+            );
+            return Err(actor_error!(SysErrIllegalArgument; "Cannot create actor: {}", msg));
         }
 
         if actor::is_singleton_actor(&code_id) {
@@ -760,14 +847,16 @@ where
                     "Can only have one instance of singleton actors."));
         }
 
-        if let Ok(Some(_)) = self.state.get_actor(address) {
+        if let Ok(Some(_)) = self.state.borrow().get_actor(address) {
             return Err(actor_error!(SysErrIllegalArgument; "Actor address already exists"));
         }
 
-        self.charge_gas(self.price_list.on_create_actor())?;
+        let gas_charge = self.price_list.on_create_actor();
+        self.charge_gas(gas_charge)?;
         self.state
+            .borrow_mut()
             .set_actor(
-                &address,
+                address,
                 ActorState::new(code_id, *EMPTY_ARR_CID, 0.into(), 0),
             )
             .map_err(|e| e.downcast_fatal("creating actor entry"))
@@ -778,17 +867,19 @@ where
     /// Aborts if the beneficiary does not exist.
     /// May only be called by the actor itself.
     fn delete_actor(&mut self, beneficiary: &Address) -> Result<(), ActorError> {
-        self.charge_gas(self.price_list.on_delete_actor())?;
+        let gas_charge = self.price_list.on_delete_actor();
+        self.charge_gas(gas_charge)?;
         let receiver = *self.message().receiver();
         let balance = self
             .state
+            .borrow()
             .get_actor(&receiver)
             .map_err(|e| e.downcast_fatal(format!("failed to get actor {}", receiver)))?
             .ok_or_else(|| actor_error!(SysErrIllegalActor; "failed to load actor in delete actor"))
             .map(|act| act.balance)?;
         if balance != 0.into() {
             if self.version >= NetworkVersion::V7 {
-                let beneficiary_id = self.resolve_address(&beneficiary)?.ok_or_else(|| {
+                let beneficiary_id = self.resolve_address(beneficiary)?.ok_or_else(|| {
                     actor_error!(SysErrIllegalArgument, "beneficiary doesn't exist")
                 })?;
 
@@ -800,23 +891,31 @@ where
                 }
             }
             // Transfer the executing actor's balance to the beneficiary
-            transfer(self.state, &receiver, beneficiary, &balance)
+            transfer(*self.state.borrow_mut(), &receiver, beneficiary, &balance)
                 .map_err(|e| e.wrap("failed to transfer balance to beneficiary actor"))?;
         }
 
         // Delete the executing actor
         self.state
+            .borrow_mut()
             .delete_actor(&receiver)
             .map_err(|e| e.downcast_fatal("failed to delete actor"))
     }
 
     fn total_fil_circ_supply(&self) -> Result<TokenAmount, ActorError> {
         self.circ_supply_calc
-            .get_supply(self.epoch, self.state)
+            .get_supply(self.epoch, *self.state.borrow())
             .map_err(|e| actor_error!(ErrIllegalState, "failed to get total circ supply: {}", e))
     }
+
     fn charge_gas(&mut self, name: &'static str, compute: i64) -> Result<(), ActorError> {
-        self.charge_gas(GasCharge::new(name, compute, 0))
+        self.gas_tracker
+            .borrow_mut()
+            .charge_gas(GasCharge::new(name, compute, 0))
+    }
+
+    fn base_fee(&self) -> &TokenAmount {
+        &self.base_fee
     }
 }
 
@@ -841,7 +940,8 @@ where
         )?;
 
         // Resolve to key address before verifying signature.
-        let signing_addr = resolve_to_key_addr(self.state, &self.store, signer)?;
+        let signing_addr = resolve_to_key_addr(&self.state.borrow(), self.store.as_ref(), signer)?;
+
         Ok(signature.verify(plaintext, &signing_addr)?)
     }
     fn hash_blake2b(&self, data: &[u8]) -> Result<[u8; 32], Box<dyn StdError>> {
@@ -869,12 +969,17 @@ where
 
         V::verify_seal(vi)
     }
-    fn verify_post(&self, vi: &WindowPoStVerifyInfo) -> Result<(), Box<dyn StdError>> {
+    fn verify_post(&self, vi: &WindowPoStVerifyInfo) -> Result<bool, Box<dyn StdError>> {
         self.gas_tracker
             .borrow_mut()
             .charge_gas(self.price_list.on_verify_post(vi))?;
 
-        V::verify_window_post(vi.randomness, &vi.proofs, &vi.challenged_sectors, vi.prover)
+        V::verify_window_post(
+            vi.randomness.clone(),
+            &vi.proofs,
+            &vi.challenged_sectors,
+            vi.prover,
+        )
     }
     fn verify_consensus_fault(
         &self,
@@ -885,7 +990,6 @@ where
         self.gas_tracker
             .borrow_mut()
             .charge_gas(self.price_list.on_verify_consensus_fault())?;
-
         // Note that block syntax is not validated. Any validly signed block will be accepted pursuant to the below conditions.
         // Whether or not it could ever have been accepted in a chain is not checked/does not matter here.
         // for that reason when checking block parent relationships, rather than instantiating a Tipset to do so
@@ -903,6 +1007,10 @@ where
         let bh_1 = BlockHeader::unmarshal_cbor(h1)?;
         let bh_2 = BlockHeader::unmarshal_cbor(h2)?;
 
+        if bh_1.cid() == bh_2.cid() {
+            return Err("no consensus fault: submitted blocks are the same".into());
+        }
+
         // (1) check conditions necessary to any consensus fault
 
         if bh_1.miner_address() != bh_2.miner_address() {
@@ -914,7 +1022,7 @@ where
             .into());
         };
         // block a must be earlier or equal to block b, epoch wise (ie at least as early in the chain).
-        if bh_1.epoch() < bh_2.epoch() {
+        if bh_2.epoch() < bh_1.epoch() {
             return Err(format!(
                 "first block must not be of higher height than second: {:?}, {:?}",
                 bh_1.epoch(),
@@ -922,7 +1030,10 @@ where
             )
             .into());
         };
+
+        // (2) check for the consensus faults themselves
         let mut cf: Option<ConsensusFault> = None;
+
         // (a) double-fork mining fault
         if bh_1.epoch() == bh_2.epoch() {
             cf = Some(ConsensusFault {
@@ -931,10 +1042,11 @@ where
                 fault_type: ConsensusFaultType::DoubleForkMining,
             })
         };
+
         // (b) time-offset mining fault
         // strictly speaking no need to compare heights based on double fork mining check above,
         // but at same height this would be a different fault.
-        if bh_1.parents() != bh_2.parents() && bh_1.epoch() != bh_2.epoch() {
+        if bh_1.parents() == bh_2.parents() && bh_1.epoch() != bh_2.epoch() {
             cf = Some(ConsensusFault {
                 target: *bh_1.miner_address(),
                 epoch: bh_2.epoch(),
@@ -947,8 +1059,8 @@ where
         // Specifically, since A is of lower height, it must be that B was mined omitting A from its tipset
         if !extra.is_empty() {
             let bh_3 = BlockHeader::unmarshal_cbor(extra)?;
-            if bh_1.parents() != bh_3.parents()
-                && bh_1.epoch() != bh_3.epoch()
+            if bh_1.parents() == bh_3.parents()
+                && bh_1.epoch() == bh_3.epoch()
                 && bh_2.parents().cids().contains(bh_3.cid())
                 && !bh_2.parents().cids().contains(bh_1.cid())
             {
@@ -960,10 +1072,8 @@ where
             }
         };
 
-        // (3) return if no consensus fault by now
-        if cf.is_none() {
-            Ok(cf)
-        } else {
+        // (3) return if no consensus fault
+        if cf.is_some() {
             // (4) expensive final checks
 
             // check blocks are properly signed by their respective miner
@@ -971,38 +1081,57 @@ where
             // which itself is signed, so it was willingly included by the miner
             self.verify_block_signature(&bh_1)?;
             self.verify_block_signature(&bh_2)?;
-
-            Ok(cf)
         }
+        Ok(cf)
     }
 
     fn batch_verify_seals(
         &self,
         vis: &[(&Address, &Vec<SealVerifyInfo>)],
     ) -> Result<HashMap<Address, Vec<bool>>, Box<dyn StdError>> {
-        // Gas charged for batch verify in actor
-
+        debug!("batch verify seals start");
         let out = vis
             .par_iter()
+            .with_min_len(vis.len() / *NUM_CPUS)
             .map(|(&addr, seals)| {
                 let results = seals
                     .par_iter()
                     .map(|s| {
-                        if let Err(err) = V::verify_seal(s) {
-                            debug!(
-                                "seal verify in batch failed (miner: {}) (err: {})",
-                                addr, err
-                            );
-                            false
-                        } else {
-                            true
+                        let verify_seal_result = std::panic::catch_unwind(|| V::verify_seal(s));
+                        match verify_seal_result {
+                            Ok(res) => {
+                                if let Err(err) = res {
+                                    debug!(
+                                        "seal verify in batch failed (miner: {}) (err: {})",
+                                        addr, err
+                                    );
+                                    false
+                                } else {
+                                    true
+                                }
+                            }
+                            Err(_) => {
+                                log::error!("seal verify internal fail (miner: {})", addr);
+                                false
+                            }
                         }
                     })
                     .collect();
                 (addr, results)
             })
             .collect();
+        debug!("batch verify seals end");
         Ok(out)
+    }
+
+    fn verify_aggregate_seals(
+        &self,
+        aggregate: &fil_types::AggregateSealVerifyProofAndInfos,
+    ) -> Result<(), Box<dyn StdError>> {
+        self.gas_tracker
+            .borrow_mut()
+            .charge_gas(self.price_list.on_verify_aggregate_seals(aggregate))?;
+        V::verify_aggregate_seals(aggregate)
     }
 }
 
@@ -1052,11 +1181,11 @@ fn transfer<BS: BlockStore>(
             ))
         })?;
 
-    f.deduct_funds(&value).map_err(|e| {
+    f.deduct_funds(value).map_err(|e| {
         actor_error!(SysErrInsufficientFunds;
         "transfer failed when deducting funds ({}): {}", value, e)
     })?;
-    t.deposit_funds(&value);
+    t.deposit_funds(value);
 
     state
         .set_actor(from, f)
@@ -1084,7 +1213,7 @@ where
     }
 
     let act = st
-        .get_actor(&addr)
+        .get_actor(addr)
         .map_err(|e| e.downcast_wrap("Failed to get actor"))?
         .ok_or_else(|| format!("Failed to retrieve actor: {}", addr))?;
 
@@ -1108,6 +1237,10 @@ fn new_account_actor(version: ActorVersion) -> ActorState {
         code: match version {
             ActorVersion::V0 => *actorv0::ACCOUNT_ACTOR_CODE_ID,
             ActorVersion::V2 => *actorv2::ACCOUNT_ACTOR_CODE_ID,
+            ActorVersion::V3 => *actorv3::ACCOUNT_ACTOR_CODE_ID,
+            ActorVersion::V4 => *actorv4::ACCOUNT_ACTOR_CODE_ID,
+            ActorVersion::V5 => *actorv5::ACCOUNT_ACTOR_CODE_ID,
+            ActorVersion::V6 => *actorv6::ACCOUNT_ACTOR_CODE_ID,
         },
         balance: TokenAmount::from(0),
         state: *EMPTY_ARR_CID,

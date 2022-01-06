@@ -1,11 +1,11 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::*;
 
 pub struct TestRand;
 impl Rand for TestRand {
-    fn get_chain_randomness(
+    fn get_chain_randomness_v1(
         &self,
         _: DomainSeparationTag,
         _: ChainEpoch,
@@ -13,7 +13,31 @@ impl Rand for TestRand {
     ) -> Result<[u8; 32], Box<dyn StdError>> {
         Ok(*b"i_am_random_____i_am_random_____")
     }
-    fn get_beacon_randomness(
+    fn get_beacon_randomness_v1(
+        &self,
+        _: DomainSeparationTag,
+        _: ChainEpoch,
+        _: &[u8],
+    ) -> Result<[u8; 32], Box<dyn StdError>> {
+        Ok(*b"i_am_random_____i_am_random_____")
+    }
+    fn get_beacon_randomness_v2(
+        &self,
+        _: DomainSeparationTag,
+        _: ChainEpoch,
+        _: &[u8],
+    ) -> Result<[u8; 32], Box<dyn StdError>> {
+        Ok(*b"i_am_random_____i_am_random_____")
+    }
+    fn get_chain_randomness_v2(
+        &self,
+        _: DomainSeparationTag,
+        _: ChainEpoch,
+        _: &[u8],
+    ) -> Result<[u8; 32], Box<dyn StdError>> {
+        Ok(*b"i_am_random_____i_am_random_____")
+    }
+    fn get_beacon_randomness_v3(
         &self,
         _: DomainSeparationTag,
         _: ChainEpoch,
@@ -36,8 +60,8 @@ impl Syscalls for TestSyscalls {
     fn verify_seal(&self, _: &SealVerifyInfo) -> Result<(), Box<dyn StdError>> {
         Ok(())
     }
-    fn verify_post(&self, _: &WindowPoStVerifyInfo) -> Result<(), Box<dyn StdError>> {
-        Ok(())
+    fn verify_post(&self, _: &WindowPoStVerifyInfo) -> Result<bool, Box<dyn StdError>> {
+        Ok(true)
     }
 
     // TODO check if this should be defaulted as well
@@ -48,5 +72,11 @@ impl Syscalls for TestSyscalls {
         _: &[u8],
     ) -> Result<Option<ConsensusFault>, Box<dyn StdError>> {
         Ok(None)
+    }
+    fn verify_aggregate_seals(
+        &self,
+        _: &fil_types::AggregateSealVerifyProofAndInfos,
+    ) -> Result<(), Box<dyn StdError>> {
+        Ok(())
     }
 }

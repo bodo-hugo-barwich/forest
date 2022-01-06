@@ -1,11 +1,11 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::ProofVerifier;
 use crate::{PoStProof, Randomness, RegisteredPoStProof, SealVerifyInfo, SectorInfo};
 use std::error::Error as StdError;
 
-/// Verifier implementation
+/// Mock verifier. This does no-op verification of any proofs.
 pub enum MockVerifier {}
 
 impl ProofVerifier for MockVerifier {
@@ -25,8 +25,8 @@ impl ProofVerifier for MockVerifier {
         _: &[PoStProof],
         _: &[SectorInfo],
         _: u64,
-    ) -> Result<(), Box<dyn StdError>> {
-        Ok(())
+    ) -> Result<bool, Box<dyn StdError>> {
+        Ok(true)
     }
     fn generate_winning_post_sector_challenge(
         _: RegisteredPoStProof,

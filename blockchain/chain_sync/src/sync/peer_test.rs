@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::*;
@@ -19,7 +19,7 @@ use std::time::Duration;
 fn peer_manager_update() {
     let db = Arc::new(MemoryDB::default());
 
-    let chain_store = Arc::new(ChainStore::new(db.clone()));
+    let chain_store = Arc::new(ChainStore::new(db));
     let (tx, _rx) = bounded(10);
     let mpool = task::block_on(MessagePool::new(
         TestApi::default(),
@@ -61,7 +61,7 @@ fn peer_manager_update() {
     )
     .unwrap();
 
-    let peer_manager = Arc::clone(&cs.network.peer_manager_cloned());
+    let peer_manager = Arc::clone(&cs.network.peer_manager);
 
     let (worker_tx, worker_rx) = bounded(10);
     task::spawn(async {
@@ -69,9 +69,9 @@ fn peer_manager_update() {
     });
 
     let source = PeerId::random();
-    let source_clone = source.clone();
+    let source_clone = source;
 
-    let gen_cloned = genesis_ts.clone();
+    let gen_cloned = genesis_ts;
     task::block_on(async {
         event_sender
             .send(NetworkEvent::HelloRequest {

@@ -1,38 +1,30 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use super::client::Filecoin;
-use blocks::{header::json::BlockHeaderJson, tipset_json::TipsetJson};
-use cid::{json::CidJson, Cid};
-use jsonrpc_v2::Error as JsonRpcError;
-use jsonrpsee::raw::RawClient;
-use jsonrpsee::transport::http::HttpTransportClient as HTC;
-use message::unsigned_message::json::UnsignedMessageJson;
+use crate::call;
+use jsonrpc_v2::Error;
+use rpc_api::chain_api::*;
 
-/// Returns a block with specified CID fom chain via RPC
-pub async fn block(client: &mut RawClient<HTC>, cid: Cid) -> Result<BlockHeaderJson, JsonRpcError> {
-    Ok(Filecoin::chain_get_block(client, CidJson(cid)).await?)
+pub async fn chain_get_block(cid: ChainGetBlockParams) -> Result<ChainGetBlockResult, Error> {
+    call(CHAIN_GET_BLOCK, cid).await
 }
 
-/// Returns genesis tipset from chain via RPC
-pub async fn genesis(client: &mut RawClient<HTC>) -> Result<TipsetJson, JsonRpcError> {
-    Ok(Filecoin::chain_get_genesis(client).await?)
+pub async fn chain_get_genesis() -> Result<ChainGetGenesisResult, Error> {
+    call(CHAIN_GET_GENESIS, ()).await
 }
 
-/// Returns canonical head of the chain via RPC
-pub async fn head(client: &mut RawClient<HTC>) -> Result<TipsetJson, JsonRpcError> {
-    Ok(Filecoin::chain_get_head(client).await?)
+pub async fn chain_head() -> Result<ChainHeadResult, Error> {
+    call(CHAIN_HEAD, ()).await
 }
 
-/// Returns messages with specified CID from chain via RPC
-pub async fn messages(
-    client: &mut RawClient<HTC>,
-    cid: Cid,
-) -> Result<UnsignedMessageJson, JsonRpcError> {
-    Ok(Filecoin::chain_get_messages(client, CidJson(cid)).await?)
+pub async fn chain_get_message(cid: ChainGetMessageParams) -> Result<ChainGetMessageResult, Error> {
+    call(CHAIN_GET_MESSAGE, cid).await
 }
 
-/// Returns IPLD node with specified CID from chain via RPC
-pub async fn read_obj(client: &mut RawClient<HTC>, cid: Cid) -> Result<Vec<u8>, JsonRpcError> {
-    Ok(Filecoin::chain_read_obj(client, CidJson(cid)).await?)
+pub async fn chain_read_obj(cid: ChainReadObjParams) -> Result<ChainReadObjResult, Error> {
+    call(CHAIN_READ_OBJ, cid).await
+}
+
+pub async fn chain_get_tipset(keys: ChainGetTipSetParams) -> Result<ChainGetTipSetResult, Error> {
+    call(CHAIN_GET_TIPSET, keys).await
 }

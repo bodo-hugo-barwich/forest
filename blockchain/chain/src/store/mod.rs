@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 pub mod base_fee;
@@ -10,4 +10,3 @@ mod tipset_tracker;
 pub use self::base_fee::*;
 pub use self::chain_store::*;
 pub use self::errors::*;
-pub use self::index::*;

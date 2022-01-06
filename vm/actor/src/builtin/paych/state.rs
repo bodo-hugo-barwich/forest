@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use address::Address;
@@ -54,7 +54,7 @@ pub struct LaneState {
 /// Specifies which `lane`s to be merged with what `nonce` on `channel_update`
 #[derive(Default, Clone, Copy, Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct Merge {
-    pub lane: u64,
+    pub lane: usize,
     pub nonce: u64,
 }
 

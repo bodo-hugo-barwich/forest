@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::{from_leb_bytes, to_leb_bytes, Error, Protocol, BLS_PUB_LEN, PAYLOAD_HASH_LEN};
@@ -61,10 +61,10 @@ pub enum Payload {
 
 impl Payload {
     /// Returns encoded bytes of Address without the protocol byte.
-    pub fn to_raw_bytes(&self) -> Vec<u8> {
+    pub fn to_raw_bytes(self) -> Vec<u8> {
         use Payload::*;
         match self {
-            ID(i) => to_leb_bytes(*i).unwrap(),
+            ID(i) => to_leb_bytes(i).unwrap(),
             Secp256k1(arr) => arr.to_vec(),
             Actor(arr) => arr.to_vec(),
             BLS(arr) => arr.to_vec(),
@@ -72,10 +72,10 @@ impl Payload {
     }
 
     /// Returns encoded bytes of Address including the protocol byte.
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(self) -> Vec<u8> {
         use Payload::*;
         let mut bz = match self {
-            ID(i) => to_leb_bytes(*i).unwrap(),
+            ID(i) => to_leb_bytes(i).unwrap(),
             Secp256k1(arr) => arr.to_vec(),
             Actor(arr) => arr.to_vec(),
             BLS(arr) => arr.to_vec(),

@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use encoding::tuple::*;
@@ -109,9 +109,7 @@ pub mod json {
         where
             S: Serializer,
         {
-            v.as_ref()
-                .map(|s| MessageReceiptJsonRef(s))
-                .serialize(serializer)
+            v.as_ref().map(MessageReceiptJsonRef).serialize(serializer)
         }
 
         pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<MessageReceipt>, D::Error>

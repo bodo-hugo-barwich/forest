@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 #[macro_use]
@@ -33,24 +33,14 @@ pub type Map<'bs, BS, V> = Hamt<'bs, BS, V, BytesKey>;
 /// Deal weight
 pub type DealWeight = BigInt;
 
-/// Used when invocation requires parameters to be an empty array of bytes
-pub fn check_empty_params(params: &Serialized) -> Result<(), ActorError> {
-    if !params.is_empty() {
-        Err(actor_error!(ErrSerialization;
-                "params expected to be empty, was: {}", base64::encode(params.bytes())))
-    } else {
-        Ok(())
-    }
-}
-
-/// Create a hamt configured with constant bit width.
+/// Create a hamt with a custom bitwidth.
 #[inline]
-pub fn make_map<BS, V>(store: &'_ BS) -> Map<'_, BS, V>
+pub fn make_empty_map<BS, V>(store: &'_ BS, bitwidth: u32) -> Map<'_, BS, V>
 where
     BS: BlockStore,
     V: DeserializeOwned + Serialize,
 {
-    Map::<_, V>::new_with_bit_width(store, HAMT_BIT_WIDTH)
+    Map::<_, V>::new_with_bit_width(store, bitwidth)
 }
 
 /// Create a map with a root cid.
@@ -64,6 +54,20 @@ where
     V: DeserializeOwned + Serialize,
 {
     Map::<_, V>::load_with_bit_width(root, store, HAMT_BIT_WIDTH)
+}
+
+/// Create a map with a root cid.
+#[inline]
+pub fn make_map_with_root_and_bitwidth<'bs, BS, V>(
+    root: &Cid,
+    store: &'bs BS,
+    bitwidth: u32,
+) -> Result<Map<'bs, BS, V>, HamtError>
+where
+    BS: BlockStore,
+    V: DeserializeOwned + Serialize,
+{
+    Map::<_, V>::load_with_bit_width(root, store, bitwidth)
 }
 
 pub fn u64_key(k: u64) -> BytesKey {

@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::errors::Error;
@@ -6,6 +6,7 @@ use super::Store;
 pub use sled::{Batch, Config, Db, Mode};
 use std::path::Path;
 
+/// Sled instance this satisfies the [Store] interface.
 #[derive(Debug)]
 pub struct SledDb {
     pub db: Db,

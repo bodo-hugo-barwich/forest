@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use crypto::VRFProof;
@@ -78,7 +78,7 @@ fn poly_val(poly: &[BigInt], x: &BigInt) -> BigInt {
 /// computes lambda in Q.256
 #[inline]
 fn lambda(power: &BigInt, total_power: &BigInt) -> BigInt {
-    ((power * BLOCKS_PER_EPOCH) << PRECISION).div_floor(&total_power)
+    ((power * BLOCKS_PER_EPOCH) << PRECISION).div_floor(total_power)
 }
 
 /// Poisson inverted CDF
@@ -215,8 +215,8 @@ pub mod json {
             win_count,
         } = Deserialize::deserialize(deserializer)?;
         Ok(ElectionProof {
-            vrfproof,
             win_count,
+            vrfproof,
         })
     }
 
@@ -228,9 +228,7 @@ pub mod json {
         where
             S: Serializer,
         {
-            v.as_ref()
-                .map(|s| ElectionProofJsonRef(s))
-                .serialize(serializer)
+            v.as_ref().map(ElectionProofJsonRef).serialize(serializer)
         }
 
         pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<ElectionProof>, D::Error>

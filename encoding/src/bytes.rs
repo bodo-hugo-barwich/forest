@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -10,7 +10,7 @@ use serde_bytes::ByteBuf;
 pub struct BytesSer<'a>(#[serde(with = "serde_bytes")] pub &'a [u8]);
 
 /// Wrapper for deserializing dynamic sized Bytes.
-#[derive(Deserialize, Serialize, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
 #[serde(transparent)]
 pub struct BytesDe(#[serde(with = "serde_bytes")] pub Vec<u8>);
 
@@ -41,6 +41,12 @@ impl<'de> Deserialize<'de> for Byte32De {
     }
 }
 
+pub fn bytes_32(buf: &[u8]) -> [u8; 32] {
+    let mut array = [0; 32];
+    array.copy_from_slice(buf.as_ref());
+    array
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,7 +54,7 @@ mod tests {
 
     #[test]
     fn array_symmetric_serialization() {
-        let vec: Vec<u8> = (0..32).map(|x| x).collect::<Vec<u8>>();
+        let vec: Vec<u8> = (0..32).collect::<Vec<u8>>();
         let slice_bz = to_vec(&BytesSer(&vec)).unwrap();
         let Byte32De(arr) = from_slice(&slice_bz).unwrap();
         // Check decoded array against slice

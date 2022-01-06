@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use actor::actorv0::{account, init, ACCOUNT_ACTOR_CODE_ID, INIT_ACTOR_ADDR, INIT_ACTOR_CODE_ID};
@@ -37,7 +37,7 @@ impl<'db> LookbackStateGetter<'db, MemoryDB> for MockStateLB<'db, MemoryDB> {
 
 struct MockRand;
 impl Rand for MockRand {
-    fn get_chain_randomness(
+    fn get_chain_randomness_v1(
         &self,
         _: DomainSeparationTag,
         _: ChainEpoch,
@@ -45,7 +45,34 @@ impl Rand for MockRand {
     ) -> Result<[u8; 32], Box<dyn StdError>> {
         Ok(*b"i_am_random_____i_am_random_____")
     }
-    fn get_beacon_randomness(
+    fn get_beacon_randomness_v1(
+        &self,
+        _: DomainSeparationTag,
+        _: ChainEpoch,
+        _: &[u8],
+    ) -> Result<[u8; 32], Box<dyn StdError>> {
+        Ok(*b"i_am_random_____i_am_random_____")
+    }
+
+    fn get_chain_randomness_v2(
+        &self,
+        _: DomainSeparationTag,
+        _: ChainEpoch,
+        _: &[u8],
+    ) -> Result<[u8; 32], Box<dyn StdError>> {
+        Ok(*b"i_am_random_____i_am_random_____")
+    }
+
+    fn get_beacon_randomness_v2(
+        &self,
+        _: DomainSeparationTag,
+        _: ChainEpoch,
+        _: &[u8],
+    ) -> Result<[u8; 32], Box<dyn StdError>> {
+        Ok(*b"i_am_random_____i_am_random_____")
+    }
+
+    fn get_beacon_randomness_v3(
         &self,
         _: DomainSeparationTag,
         _: ChainEpoch,
@@ -66,20 +93,15 @@ fn transfer_test() {
         .unwrap();
 
     // Create and save init actor
-    let init_state = init::State::new(e_cid.clone(), "test".to_owned());
+    let init_state = init::State::new(e_cid, "test".to_owned());
     let state_cid = state
         .store()
         .put(&init_state, Blake2b256)
         .map_err(|e| e.to_string())
         .unwrap();
 
-    let act_s = ActorState::new(
-        INIT_ACTOR_CODE_ID.clone(),
-        state_cid.clone(),
-        Default::default(),
-        1,
-    );
-    state.set_actor(&INIT_ACTOR_ADDR, act_s.clone()).unwrap();
+    let act_s = ActorState::new(*INIT_ACTOR_CODE_ID, state_cid, Default::default(), 1);
+    state.set_actor(&INIT_ACTOR_ADDR, act_s).unwrap();
 
     let actor_addr_1 = Address::new_id(100);
     let actor_addr_2 = Address::new_id(200);
@@ -88,7 +110,7 @@ fn transfer_test() {
         .store()
         .put(
             &account::State {
-                address: actor_addr_1.clone(),
+                address: actor_addr_1,
             },
             Identity,
         )
@@ -99,24 +121,19 @@ fn transfer_test() {
         .store()
         .put(
             &account::State {
-                address: actor_addr_2.clone(),
+                address: actor_addr_2,
             },
             Identity,
         )
         .map_err(|e| e.to_string())
         .unwrap();
     let actor_state_1 = ActorState::new(
-        ACCOUNT_ACTOR_CODE_ID.clone(),
-        actor_state_cid_1.clone(),
+        *ACCOUNT_ACTOR_CODE_ID,
+        actor_state_cid_1,
         10000u64.into(),
         0,
     );
-    let actor_state_2 = ActorState::new(
-        ACCOUNT_ACTOR_CODE_ID.clone(),
-        actor_state_cid_2.clone(),
-        1u64.into(),
-        0,
-    );
+    let actor_state_2 = ActorState::new(*ACCOUNT_ACTOR_CODE_ID, actor_state_cid_2, 1u64.into(), 0);
 
     let actor_addr_1 = state.register_new_address(&actor_addr_1).unwrap();
     let actor_addr_2 = state.register_new_address(&actor_addr_2).unwrap();
@@ -124,8 +141,8 @@ fn transfer_test() {
     state.set_actor(&actor_addr_2, actor_state_2).unwrap();
 
     let message = UnsignedMessage::builder()
-        .to(actor_addr_1.clone())
-        .from(actor_addr_2.clone())
+        .to(actor_addr_1)
+        .from(actor_addr_2)
         .method_num(2)
         .value(1u8.into())
         .gas_limit(10000000)
@@ -141,9 +158,10 @@ fn transfer_test() {
         &mut state,
         &store,
         0,
+        0.into(),
         &message,
         0,
-        actor_addr_2.clone(),
+        actor_addr_2,
         0,
         0,
         0,

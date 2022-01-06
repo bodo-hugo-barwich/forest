@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 #[derive(Default, Clone, Debug)]
@@ -69,6 +69,18 @@ impl BitWriter {
         }
         self.bytes
     }
+
+    /// Writes any remaining bits to the buffer and returns it.
+    /// We write remaining bits even if they are are 0s.
+    /// This method is for testing purpose only.
+    #[cfg(test)]
+    pub fn finish_test(mut self) -> Vec<u8> {
+        if self.num_bits > 0 {
+            self.bytes.push(self.bits as u8);
+        }
+
+        self.bytes
+    }
 }
 
 #[cfg(test)]
@@ -131,7 +143,7 @@ mod tests {
 
         writer.write_len(147); // prefix: 00, value: 11001001 10000000
         assert_eq!(
-            writer.clone().finish(),
+            writer.finish(),
             &[
                 0b0001_0101,
                 0b1101_0111,

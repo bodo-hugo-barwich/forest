@@ -1,24 +1,31 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::{policy::*, types::*, DealProposal, DealState, DEAL_UPDATES_INTERVAL};
-use crate::{make_map_with_root, ActorDowncast, BalanceTable, DealID, Map, SetMultimap};
+use crate::{make_empty_map, ActorDowncast, BalanceTable, DealID, Set, SetMultimap};
 use address::Address;
 use cid::Cid;
 use clock::{ChainEpoch, EPOCH_UNDEFINED};
 use encoding::tuple::*;
 use encoding::Cbor;
+use fil_types::HAMT_BIT_WIDTH;
+use ipld_amt::Amt;
 use ipld_blockstore::BlockStore;
-use num_bigint::{bigint_ser, Sign};
-use num_traits::Zero;
+use num_bigint::bigint_ser;
+use num_traits::{Signed, Zero};
 use std::error::Error as StdError;
 use vm::{actor_error, ActorError, ExitCode, TokenAmount};
 
 /// Market actor state
-#[derive(Default, Serialize_tuple, Deserialize_tuple)]
+#[derive(Clone, Default, Serialize_tuple, Deserialize_tuple)]
 pub struct State {
+    /// Proposals are deals that have been proposed and not yet cleaned up after expiry or termination.
     /// Amt<DealID, DealProposal>
     pub proposals: Cid,
+
+    // States contains state for deals that have been activated and not yet cleaned up after expiry or termination.
+    // After expiration, the state exists until the proposal is cleaned up too.
+    // Invariant: keys(States) ⊆ keys(Proposals).
     /// Amt<DealID, DealState>
     pub states: Cid,
 
@@ -54,21 +61,39 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(empty_arr: Cid, empty_map: Cid, empty_mset: Cid) -> Self {
-        Self {
-            proposals: empty_arr,
-            states: empty_arr,
-            pending_proposals: empty_map,
-            escrow_table: empty_map,
-            locked_table: empty_map,
+    pub fn new<BS: BlockStore>(store: &BS) -> Result<Self, Box<dyn StdError>> {
+        let empty_proposals_array =
+            Amt::<(), BS>::new_with_bit_width(store, PROPOSALS_AMT_BITWIDTH)
+                .flush()
+                .map_err(|e| format!("Failed to create empty proposals array: {}", e))?;
+        let empty_states_array = Amt::<(), BS>::new_with_bit_width(store, STATES_AMT_BITWIDTH)
+            .flush()
+            .map_err(|e| format!("Failed to create empty states array: {}", e))?;
+
+        let empty_pending_proposals_map = make_empty_map::<_, ()>(store, HAMT_BIT_WIDTH)
+            .flush()
+            .map_err(|e| format!("Failed to create empty pending proposals map state: {}", e))?;
+        let empty_balance_table = BalanceTable::new(store)
+            .root()
+            .map_err(|e| format!("Failed to create empty balance table map: {}", e))?;
+
+        let empty_deal_ops_hamt = SetMultimap::new(store)
+            .root()
+            .map_err(|e| format!("Failed to create empty multiset: {}", e))?;
+        Ok(Self {
+            proposals: empty_proposals_array,
+            states: empty_states_array,
+            pending_proposals: empty_pending_proposals_map,
+            escrow_table: empty_balance_table,
+            locked_table: empty_balance_table,
             next_id: 0,
-            deal_ops_by_epoch: empty_mset,
+            deal_ops_by_epoch: empty_deal_ops_hamt,
             last_cron: EPOCH_UNDEFINED,
 
             total_client_locked_colateral: TokenAmount::default(),
             total_provider_locked_colateral: TokenAmount::default(),
             total_client_storage_fee: TokenAmount::default(),
-        }
+        })
     }
 
     pub fn total_locked(&self) -> TokenAmount {
@@ -85,19 +110,32 @@ impl State {
     }
 }
 
-fn deal_get_payment_remaining(deal: &DealProposal, mut slash_epoch: ChainEpoch) -> TokenAmount {
-    assert!(
-        slash_epoch <= deal.end_epoch,
-        "Current epoch must be before the end epoch of the deal"
-    );
+fn deal_get_payment_remaining(
+    deal: &DealProposal,
+    mut slash_epoch: ChainEpoch,
+) -> Result<TokenAmount, ActorError> {
+    if slash_epoch > deal.end_epoch {
+        return Err(actor_error!(
+            ErrIllegalState,
+            "deal slash epoch {} after end epoch {}",
+            slash_epoch,
+            deal.end_epoch
+        ));
+    }
 
     // Payments are always for start -> end epoch irrespective of when the deal is slashed.
     slash_epoch = std::cmp::max(slash_epoch, deal.start_epoch);
 
     let duration_remaining = deal.end_epoch - slash_epoch;
-    assert!(duration_remaining >= 0);
+    if duration_remaining < 0 {
+        return Err(actor_error!(
+            ErrIllegalState,
+            "deal remaining duration negative: {}",
+            duration_remaining
+        ));
+    }
 
-    &deal.storage_price_per_epoch * duration_remaining as u64
+    Ok(&deal.storage_price_per_epoch * duration_remaining as u64)
 }
 
 impl Cbor for State {}
@@ -129,7 +167,7 @@ pub(super) struct MarketStateMutation<'bs, 's, BS> {
     pub(super) escrow_table: Option<BalanceTable<'bs, BS>>,
 
     pub(super) pending_permit: Permission,
-    pub(super) pending_deals: Option<Map<'bs, BS, DealProposal>>,
+    pub(super) pending_deals: Option<Set<'bs, BS>>,
 
     pub(super) dpe_permit: Permission,
     pub(super) deals_by_epoch: Option<SetMultimap<'bs, BS>>,
@@ -193,7 +231,7 @@ where
         }
 
         if self.pending_permit != Permission::Invalid {
-            self.pending_deals = Some(make_map_with_root(&self.st.pending_proposals, self.store)?);
+            self.pending_deals = Some(Set::from_root(self.store, &self.st.pending_proposals)?);
         }
 
         if self.dpe_permit != Permission::Invalid {
@@ -283,7 +321,7 @@ where
         if self.pending_permit == Permission::Write {
             if let Some(s) = &mut self.pending_deals {
                 self.st.pending_proposals = s
-                    .flush()
+                    .root()
                     .map_err(|e| e.downcast_wrap("failed to flush escrow table"))?;
             }
         }
@@ -315,7 +353,13 @@ where
         let ever_slashed = state.slash_epoch != EPOCH_UNDEFINED;
 
         // if the deal was ever updated, make sure it didn't happen in the future
-        assert!(!ever_updated || state.last_updated_epoch <= epoch);
+        if ever_updated && state.last_updated_epoch > epoch {
+            return Err(actor_error!(
+                ErrIllegalState,
+                "deal updated at future epoch {}",
+                state.last_updated_epoch
+            ));
+        }
 
         // This would be the case that the first callback somehow triggers before it is scheduled to
         // This is expected not to be able to happen
@@ -324,14 +368,21 @@ where
         }
 
         let payment_end_epoch = if ever_slashed {
-            assert!(
-                state.slash_epoch <= deal.end_epoch,
-                "Epoch slashed must be less or equal to the end epoch"
-            );
-            assert!(
-                epoch >= state.slash_epoch,
-                "Epoch slashed must be less or equal to the end epoch"
-            );
+            if epoch < state.slash_epoch {
+                return Err(actor_error!(
+                    ErrIllegalState,
+                    "current epoch less than deal slash epoch {}",
+                    state.slash_epoch
+                ));
+            }
+            if state.slash_epoch > deal.end_epoch {
+                return Err(actor_error!(
+                    ErrIllegalState,
+                    "deal slash epoch {} after deal end {}",
+                    state.slash_epoch,
+                    deal.end_epoch
+                ));
+            }
             state.slash_epoch
         } else {
             std::cmp::min(deal.end_epoch, epoch)
@@ -352,7 +403,7 @@ where
 
         if ever_slashed {
             // unlock client collateral and locked storage fee
-            let payment_remaining = deal_get_payment_remaining(&deal, state.slash_epoch);
+            let payment_remaining = deal_get_payment_remaining(deal, state.slash_epoch)?;
 
             // Unlock remaining storage fee
             self.unlock_balance(&deal.client, &payment_remaining, Reason::ClientStorageFee)
@@ -385,7 +436,7 @@ where
         }
 
         if epoch >= deal.end_epoch {
-            self.process_deal_expired(&deal, state)?;
+            self.process_deal_expired(deal, state)?;
             return Ok((TokenAmount::zero(), EPOCH_UNDEFINED, true));
         }
 
@@ -461,10 +512,12 @@ where
     where
         BS: BlockStore,
     {
-        assert_ne!(
-            state.sector_start_epoch, EPOCH_UNDEFINED,
-            "Sector start epoch must be initialized at this point"
-        );
+        if state.sector_start_epoch == EPOCH_UNDEFINED {
+            return Err(actor_error!(
+                ErrIllegalState,
+                "start sector epoch undefined"
+            ));
+        }
 
         self.unlock_balance(
             &deal.provider,
@@ -473,7 +526,7 @@ where
         )
         .map_err(|e| {
             e.downcast_default(
-                ExitCode::ErrIllegalArgument,
+                ExitCode::ErrIllegalState,
                 "failed unlocking deal provider balance",
             )
         })?;
@@ -485,7 +538,7 @@ where
         )
         .map_err(|e| {
             e.downcast_default(
-                ExitCode::ErrIllegalArgument,
+                ExitCode::ErrIllegalState,
                 "failed unlocking deal client balance",
             )
         })?;
@@ -499,12 +552,43 @@ where
         ret
     }
 
+    // Return true when the funds in escrow for the input address can cover an additional lockup of amountToLock
+    pub(super) fn balance_covered(
+        &self,
+        addr: Address,
+        amount_to_lock: &TokenAmount,
+    ) -> Result<bool, Box<dyn StdError>> {
+        let prev_locked = self
+            .locked_table
+            .as_ref()
+            .unwrap()
+            .get(&addr)
+            .map_err(|e| {
+                e.downcast_default(ExitCode::ErrIllegalState, "failed to get locked balance")
+            })?;
+        let escrow_balance = self
+            .escrow_table
+            .as_ref()
+            .unwrap()
+            .get(&addr)
+            .map_err(|e| {
+                e.downcast_default(ExitCode::ErrIllegalState, "failed to get escrow balance")
+            })?;
+        Ok((prev_locked + amount_to_lock) <= escrow_balance)
+    }
+
     pub(super) fn maybe_lock_balance(
         &mut self,
         addr: &Address,
         amount: &TokenAmount,
     ) -> Result<(), ActorError> {
-        assert_ne!(amount.sign(), Sign::Minus);
+        if amount.is_negative() {
+            return Err(actor_error!(
+                ErrIllegalState,
+                "cannot lock negative amount {}",
+                amount
+            ));
+        }
 
         let prev_locked = self.locked_table.as_ref().unwrap().get(addr).map_err(|e| {
             e.downcast_default(ExitCode::ErrIllegalState, "failed to get locked balance")
@@ -517,7 +601,7 @@ where
         if &prev_locked + amount > escrow_balance {
             return Err(actor_error!(ErrInsufficientFunds;
                     "not enough balance to lock for addr{}: \
-                    escrow balance {} < prev locked {} + amount {}", 
+                    escrow balance {} < prev locked {} + amount {}",
                     addr, escrow_balance, prev_locked, amount));
         }
 
@@ -559,7 +643,13 @@ where
         amount: &TokenAmount,
         lock_reason: Reason,
     ) -> Result<(), Box<dyn StdError>> {
-        assert_ne!(amount.sign(), Sign::Minus);
+        if amount.is_negative() {
+            return Err(Box::new(actor_error!(
+                ErrIllegalState,
+                "unlock negative amount: {}",
+                amount
+            )));
+        }
         self.locked_table
             .as_mut()
             .unwrap()
@@ -587,23 +677,29 @@ where
         to_addr: &Address,
         amount: &TokenAmount,
     ) -> Result<(), ActorError> {
-        assert!(amount >= &TokenAmount::from(0));
+        if amount.is_negative() {
+            return Err(actor_error!(
+                ErrIllegalState,
+                "transfer negative amount: {}",
+                amount
+            ));
+        }
 
         // Subtract from locked and escrow tables
         self.escrow_table
             .as_mut()
             .unwrap()
-            .must_subtract(from_addr, &amount)
+            .must_subtract(from_addr, amount)
             .map_err(|e| e.downcast_default(ExitCode::ErrIllegalState, "subtract from escrow"))?;
 
-        self.unlock_balance(from_addr, &amount, Reason::ClientStorageFee)
+        self.unlock_balance(from_addr, amount, Reason::ClientStorageFee)
             .map_err(|e| e.downcast_default(ExitCode::ErrIllegalState, "subtract from locked"))?;
 
         // Add subtracted amount to the recipient
         self.escrow_table
             .as_mut()
             .unwrap()
-            .add(to_addr, &amount)
+            .add(to_addr, amount)
             .map_err(|e| e.downcast_default(ExitCode::ErrIllegalState, "add to escrow"))?;
 
         Ok(())
@@ -615,13 +711,19 @@ where
         amount: &TokenAmount,
         lock_reason: Reason,
     ) -> Result<(), Box<dyn StdError>> {
-        assert!(amount >= &TokenAmount::from(0));
+        if amount.is_negative() {
+            return Err(Box::new(actor_error!(
+                ErrIllegalState,
+                "negative amount to slash: {}",
+                amount
+            )));
+        }
 
         // Subtract from locked and escrow tables
         self.escrow_table
             .as_mut()
             .unwrap()
-            .must_subtract(addr, &amount)?;
+            .must_subtract(addr, amount)?;
         self.unlock_balance(addr, amount, lock_reason)
     }
 }

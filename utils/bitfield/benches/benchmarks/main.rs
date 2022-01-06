@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 mod examples;
@@ -21,7 +21,7 @@ fn bits(c: &mut Criterion) {
 }
 
 fn new(c: &mut Criterion) {
-    c.bench_function("new", |b| b.iter(|| example1()));
+    c.bench_function("new", |b| b.iter(example1));
 }
 
 fn decode_encode(c: &mut Criterion) {

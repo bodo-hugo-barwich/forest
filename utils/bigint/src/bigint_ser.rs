@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use num_bigint::{BigInt, Sign};
@@ -11,7 +11,7 @@ use std::borrow::Cow;
 pub struct BigIntSer<'a>(#[serde(with = "self")] pub &'a BigInt);
 
 /// Wrapper for deserializing as BigInt from bytes.
-#[derive(Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(transparent)]
 pub struct BigIntDe(#[serde(with = "self")] pub BigInt);
 

@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::{Message, UnsignedMessage};
@@ -8,7 +8,7 @@ use encoding::tuple::*;
 use encoding::{to_vec, Cbor, Error};
 use vm::{MethodNum, Serialized, TokenAmount};
 
-/// Represents a wrapped message with signature bytes
+/// Represents a wrapped message with signature bytes.
 #[derive(PartialEq, Clone, Debug, Serialize_tuple, Deserialize_tuple, Hash, Eq)]
 pub struct SignedMessage {
     pub message: UnsignedMessage,
@@ -25,7 +25,7 @@ impl SignedMessage {
         Ok(SignedMessage { message, signature })
     }
 
-    /// Generate a new signed message from fields
+    /// Generate a new signed message from fields.
     pub fn new_from_parts(
         message: UnsignedMessage,
         signature: Signature,
@@ -44,7 +44,7 @@ impl SignedMessage {
         &self.signature
     }
 
-    /// Consumes self and returns it's unsigned message
+    /// Consumes self and returns it's unsigned message.
     pub fn into_message(self) -> UnsignedMessage {
         self.message
     }
@@ -98,10 +98,10 @@ impl Message for SignedMessage {
         self.message.required_funds()
     }
     fn gas_fee_cap(&self) -> &TokenAmount {
-        &self.message.gas_fee_cap()
+        self.message.gas_fee_cap()
     }
     fn gas_premium(&self) -> &TokenAmount {
-        &self.message.gas_premium()
+        self.message.gas_premium()
     }
 
     fn set_gas_fee_cap(&mut self, cap: TokenAmount) {

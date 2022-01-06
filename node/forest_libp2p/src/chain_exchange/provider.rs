@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use chain::{ChainStore, Error as ChainError};
@@ -149,7 +149,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::BLOCKS_MESSAGES;
+    use super::super::{HEADERS, MESSAGES};
     use super::*;
     use async_std::io::BufReader;
     use db::MemoryDB;
@@ -174,7 +174,7 @@ mod tests {
             &ChainExchangeRequest {
                 start: cids,
                 request_len: 2,
-                options: BLOCKS_MESSAGES,
+                options: HEADERS | MESSAGES,
             },
         )
         .await;

@@ -1,11 +1,11 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use crate::BlockHeader;
 use cid::Cid;
 use encoding::{tuple::*, Cbor};
 
-/// Block message used as serialized gossipsub messages for blocks topic
+/// Block message used as serialized gossipsub messages for blocks topic.
 #[derive(Clone, Debug, Serialize_tuple, Deserialize_tuple)]
 pub struct GossipBlock {
     pub header: BlockHeader,

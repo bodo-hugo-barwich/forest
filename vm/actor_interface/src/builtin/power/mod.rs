@@ -1,4 +1,4 @@
-// Copyright 2020 ChainSafe Systems
+// Copyright 2019-2022 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use crate::FilterEstimate;
@@ -6,15 +6,17 @@ use address::Address;
 use fil_types::StoragePower;
 use ipld_blockstore::BlockStore;
 use num_bigint::bigint_ser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use vm::{ActorState, TokenAmount};
 
 /// Power actor address.
-pub static ADDRESS: &actorv2::STORAGE_POWER_ACTOR_ADDR = &actorv2::STORAGE_POWER_ACTOR_ADDR;
+/// TODO: Select based on actors version
+pub static ADDRESS: &actorv4::STORAGE_POWER_ACTOR_ADDR = &actorv4::STORAGE_POWER_ACTOR_ADDR;
 
 /// Power actor method.
-pub type Method = actorv2::power::Method;
+/// TODO: Select based on actor version
+pub type Method = actorv4::power::Method;
 
 /// Power actor state.
 #[derive(Serialize)]
@@ -22,6 +24,10 @@ pub type Method = actorv2::power::Method;
 pub enum State {
     V0(actorv0::power::State),
     V2(actorv2::power::State),
+    V3(actorv3::power::State),
+    V4(actorv4::power::State),
+    V5(actorv5::power::State),
+    V6(actorv6::power::State),
 }
 
 impl State {
@@ -39,6 +45,26 @@ impl State {
                 .get(&actor.state)?
                 .map(State::V2)
                 .ok_or("Actor state doesn't exist in store")?)
+        } else if actor.code == *actorv3::POWER_ACTOR_CODE_ID {
+            Ok(store
+                .get(&actor.state)?
+                .map(State::V3)
+                .ok_or("Actor state doesn't exist in store")?)
+        } else if actor.code == *actorv4::POWER_ACTOR_CODE_ID {
+            Ok(store
+                .get(&actor.state)?
+                .map(State::V4)
+                .ok_or("Actor state doesn't exist in store")?)
+        } else if actor.code == *actorv5::POWER_ACTOR_CODE_ID {
+            Ok(store
+                .get(&actor.state)?
+                .map(State::V5)
+                .ok_or("Actor state doesn't exist in store")?)
+        } else if actor.code == *actorv6::POWER_ACTOR_CODE_ID {
+            Ok(store
+                .get(&actor.state)?
+                .map(State::V6)
+                .ok_or("Actor state doesn't exist in store")?)
         } else {
             Err(format!("Unknown actor code {}", actor.code).into())
         }
@@ -49,6 +75,10 @@ impl State {
         match self {
             State::V0(st) => st.total_quality_adj_power,
             State::V2(st) => st.total_quality_adj_power,
+            State::V3(st) => st.total_quality_adj_power,
+            State::V4(st) => st.total_quality_adj_power,
+            State::V5(st) => st.total_quality_adj_power,
+            State::V6(st) => st.total_quality_adj_power,
         }
     }
 
@@ -63,6 +93,22 @@ impl State {
                 raw_byte_power: st.total_raw_byte_power.clone(),
                 quality_adj_power: st.total_quality_adj_power.clone(),
             },
+            State::V3(st) => Claim {
+                raw_byte_power: st.total_raw_byte_power.clone(),
+                quality_adj_power: st.total_quality_adj_power.clone(),
+            },
+            State::V4(st) => Claim {
+                raw_byte_power: st.total_raw_byte_power.clone(),
+                quality_adj_power: st.total_quality_adj_power.clone(),
+            },
+            State::V5(st) => Claim {
+                raw_byte_power: st.total_raw_byte_power.clone(),
+                quality_adj_power: st.total_quality_adj_power.clone(),
+            },
+            State::V6(st) => Claim {
+                raw_byte_power: st.total_raw_byte_power.clone(),
+                quality_adj_power: st.total_quality_adj_power.clone(),
+            },
         }
     }
 
@@ -71,6 +117,10 @@ impl State {
         match self {
             State::V0(st) => st.into_total_locked(),
             State::V2(st) => st.into_total_locked(),
+            State::V3(st) => st.into_total_locked(),
+            State::V4(st) => st.into_total_locked(),
+            State::V5(st) => st.into_total_locked(),
+            State::V6(st) => st.into_total_locked(),
         }
     }
 
@@ -83,6 +133,10 @@ impl State {
         match self {
             State::V0(st) => Ok(st.miner_power(s, miner)?.map(From::from)),
             State::V2(st) => Ok(st.miner_power(s, miner)?.map(From::from)),
+            State::V3(st) => Ok(st.miner_power(s, miner)?.map(From::from)),
+            State::V4(st) => Ok(st.miner_power(s, miner)?.map(From::from)),
+            State::V5(st) => Ok(st.miner_power(s, miner)?.map(From::from)),
+            State::V6(st) => Ok(st.miner_power(s, miner)?.map(From::from)),
         }
     }
 
@@ -109,6 +163,46 @@ impl State {
 
                 Ok(miners)
             }
+            State::V3(st) => {
+                let claims = actorv3::make_map_with_root(&st.claims, s)?;
+                let mut miners = Vec::new();
+                claims.for_each(|k, _: &actorv3::power::Claim| {
+                    miners.push(Address::from_bytes(&k.0)?);
+                    Ok(())
+                })?;
+
+                Ok(miners)
+            }
+            State::V4(st) => {
+                let claims = actorv4::make_map_with_root(&st.claims, s)?;
+                let mut miners = Vec::new();
+                claims.for_each(|k, _: &actorv3::power::Claim| {
+                    miners.push(Address::from_bytes(&k.0)?);
+                    Ok(())
+                })?;
+
+                Ok(miners)
+            }
+            State::V5(st) => {
+                let claims = actorv5::make_map_with_root(&st.claims, s)?;
+                let mut miners = Vec::new();
+                claims.for_each(|k, _: &actorv3::power::Claim| {
+                    miners.push(Address::from_bytes(&k.0)?);
+                    Ok(())
+                })?;
+
+                Ok(miners)
+            }
+            State::V6(st) => {
+                let claims = actorv6::make_map_with_root(&st.claims, s)?;
+                let mut miners = Vec::new();
+                claims.for_each(|k, _: &actorv3::power::Claim| {
+                    miners.push(Address::from_bytes(&k.0)?);
+                    Ok(())
+                })?;
+
+                Ok(miners)
+            }
         }
     }
 
@@ -121,6 +215,10 @@ impl State {
         match self {
             State::V0(st) => st.miner_nominal_power_meets_consensus_minimum(s, miner),
             State::V2(st) => st.miner_nominal_power_meets_consensus_minimum(s, miner),
+            State::V3(st) => st.miner_nominal_power_meets_consensus_minimum(s, miner),
+            State::V4(st) => st.miner_nominal_power_meets_consensus_minimum(s, miner),
+            State::V5(st) => st.miner_nominal_power_meets_consensus_minimum(s, miner),
+            State::V6(st) => st.miner_nominal_power_meets_consensus_minimum(s, miner),
         }
     }
 
@@ -129,6 +227,10 @@ impl State {
         match self {
             State::V0(st) => st.this_epoch_qa_power_smoothed.clone().into(),
             State::V2(st) => st.this_epoch_qa_power_smoothed.clone().into(),
+            State::V3(st) => st.this_epoch_qa_power_smoothed.clone().into(),
+            State::V4(st) => st.this_epoch_qa_power_smoothed.clone().into(),
+            State::V5(st) => st.this_epoch_qa_power_smoothed.clone().into(),
+            State::V6(st) => st.this_epoch_qa_power_smoothed.clone().into(),
         }
     }
 
@@ -137,11 +239,15 @@ impl State {
         match self {
             State::V0(st) => st.total_pledge_collateral.clone(),
             State::V2(st) => st.total_pledge_collateral.clone(),
+            State::V3(st) => st.total_pledge_collateral.clone(),
+            State::V4(st) => st.total_pledge_collateral.clone(),
+            State::V5(st) => st.total_pledge_collateral.clone(),
+            State::V6(st) => st.total_pledge_collateral.clone(),
         }
     }
 }
 
-#[derive(Default, Debug, Serialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Claim {
     /// Sum of raw byte power for a miner's sectors.
     #[serde(with = "bigint_ser::json")]
@@ -162,6 +268,42 @@ impl From<actorv0::power::Claim> for Claim {
 
 impl From<actorv2::power::Claim> for Claim {
     fn from(cl: actorv2::power::Claim) -> Self {
+        Self {
+            raw_byte_power: cl.raw_byte_power,
+            quality_adj_power: cl.quality_adj_power,
+        }
+    }
+}
+
+impl From<actorv3::power::Claim> for Claim {
+    fn from(cl: actorv3::power::Claim) -> Self {
+        Self {
+            raw_byte_power: cl.raw_byte_power,
+            quality_adj_power: cl.quality_adj_power,
+        }
+    }
+}
+
+impl From<actorv4::power::Claim> for Claim {
+    fn from(cl: actorv4::power::Claim) -> Self {
+        Self {
+            raw_byte_power: cl.raw_byte_power,
+            quality_adj_power: cl.quality_adj_power,
+        }
+    }
+}
+
+impl From<actorv5::power::Claim> for Claim {
+    fn from(cl: actorv5::power::Claim) -> Self {
+        Self {
+            raw_byte_power: cl.raw_byte_power,
+            quality_adj_power: cl.quality_adj_power,
+        }
+    }
+}
+
+impl From<actorv6::power::Claim> for Claim {
+    fn from(cl: actorv6::power::Claim) -> Self {
         Self {
             raw_byte_power: cl.raw_byte_power,
             quality_adj_power: cl.quality_adj_power,
