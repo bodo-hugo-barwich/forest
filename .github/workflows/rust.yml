@@ -37,7 +37,7 @@ jobs:
       run: | 
         echo "Operating System:" && cat /etc/os-release
         echo "RustUp Version:" && rustup --version
-        echo "RustUp Toolchains Installed:" && rustup toolchain list --installed
+        echo "RustUp Toolchains Installed:" && rustup toolchain list
         echo "RustUp Components Installed:" && rustup component list --installed
         echo "Rust Compiler Version:" && rustc --version
         
