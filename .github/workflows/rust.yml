@@ -40,10 +40,10 @@ jobs:
         echo "Rust Compiler Version:" && rustc --version
         
     # Install Rust Version according to Test Matrix
-    - name: Install Rust Version '${{ matrix.node-version }}'
+    - name: Install Rust Version '${{ matrix.rust-version }}'
       run: | 
-        echo "Requested Rust Compiler Version:" ${{ matrix.node-version }}
-        rustup install ${{ matrix.node-version }}
+        echo "Requested Rust Compiler Version:" ${{ matrix.rust-version }}
+        rustup install ${{ matrix.rust-version }}
         echo "Rust Compiler Version:" && rustc --version
         
     - uses: actions/checkout@v2
