@@ -39,6 +39,16 @@ jobs:
         echo "RustUp Version:" && rustup --version
         echo "Rust Compiler Version:" && rustc --version
         
+    # Uninstall previous Rust Version
+    - name: Uninstall Preinstalled Rust Version
+      run: | 
+        echo "Uninstalling Rust Compiler:"
+        rustup uninstall rustc
+        rustup uninstall rust-std
+        rustup uninstall cargo
+        rustup uninstall rustfmt
+        rustup uninstall cargo-fmt
+        
     # Install Rust Version according to Test Matrix
     - name: Install Rust Version '${{ matrix.rust-version }}'
       run: | 
