@@ -36,7 +36,7 @@ jobs:
     - name: Show Environment and Compiler Version
       run: | 
         echo "Operating System:" && cat /etc/os-release
-        echo "RustUp Help:" && rustup help
+        echo "RustUp Version:" && rustup --version
         echo "Rust Compiler Version:" && rustc --version
         
     # Install Rust Version according to Test Matrix
