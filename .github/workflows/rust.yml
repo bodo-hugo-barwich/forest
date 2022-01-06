@@ -46,11 +46,7 @@ jobs:
         echo "Directory Content of '/home/runner/.cargo/bin':"
         ls -lah ~/.cargo/bin
         echo "Uninstalling Rust Compiler:"
-        rustup uninstall rustc
-        rustup uninstall rust-std
-        rustup uninstall cargo
-        rustup uninstall rustfmt
-        rustup uninstall cargo-fmt
+        rustup uninstall toolchain x86_64-unknown-linux-gnu
         
     # Install Rust Version according to Test Matrix
     - name: Install Rust Version '${{ matrix.rust-version }}'
