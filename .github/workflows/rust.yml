@@ -37,6 +37,7 @@ jobs:
       run: | 
         echo "Operating System:" && cat /etc/os-release
         echo "RustUp Version:" && rustup --version
+        echo "RustUp Components Installed:" && rustup component list --installed
         echo "Rust Compiler Version:" && rustc --version
         
     # Uninstall previous Rust Version
