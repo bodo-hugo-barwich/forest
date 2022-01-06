@@ -16,6 +16,16 @@ jobs:
     runs-on: ubuntu-20.04
 
     steps:
+    # List all installed Rust Libraries
+    - name: List all installed Rust Libraries
+      run: dpkg --get-selections | grep -i rust | wc -l && dpkg --get-selections | grep -i rust | sort
+        
+    # Show Environment and Compiler Version
+    - name: Show Environment and Compiler Version
+      run: | 
+        echo "Operating System:" && cat /etc/os-release
+        echo "Rust Compiler Version:" && rustc --version
+        
     - uses: actions/checkout@v2
     - name: Build
       run: cargo build --verbose
