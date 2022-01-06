@@ -42,6 +42,8 @@ jobs:
     # Uninstall previous Rust Version
     - name: Uninstall Preinstalled Rust Version
       run: | 
+        echo "Directory Content of '/home/runner/.cargo/bin':"
+        ls -lah ~/.cargo/bin
         echo "Uninstalling Rust Compiler:"
         rustup uninstall rustc
         rustup uninstall rust-std
