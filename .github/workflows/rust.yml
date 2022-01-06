@@ -48,11 +48,8 @@ jobs:
         ls -lah ~/.cargo/bin
         echo "* Uninstalling Rust Compiler:"
         rustup toolchain uninstall stable-x86_64-unknown-linux-gnu
+        rustup component uninstall rustfmt-x86_64-unknown-linux-gnu
         echo "* Directory ~/.cargo/bin' Content 1 :"
-        ls -lah ~/.cargo/bin
-        echo "* Directory delete Files ..."
-        rm -f ~/.cargo/bin/*
-        echo "* Directory '~/.cargo/bin' Content 2 :"
         ls -lah ~/.cargo/bin
         
     # Install Rust Version according to Test Matrix
