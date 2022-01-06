@@ -44,10 +44,12 @@ jobs:
     # Uninstall previous Rust Version
     - name: Uninstall Preinstalled Rust Version
       run: | 
-        echo "Directory Content of '/home/runner/.cargo/bin':"
+        echo "Directory Content of '/home/runner/.cargo/bin' 0:"
         ls -lah ~/.cargo/bin
         echo "Uninstalling Rust Compiler:"
-        rustup toolchain uninstall x86_64-unknown-linux-gnu
+        rustup toolchain uninstall stable-x86_64-unknown-linux-gnu
+        echo "Directory Content of '/home/runner/.cargo/bin' 1:"
+        ls -lah ~/.cargo/bin
         
     # Install Rust Version according to Test Matrix
     - name: Install Rust Version '${{ matrix.rust-version }}'
