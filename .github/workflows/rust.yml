@@ -38,6 +38,7 @@ jobs:
         echo "* Operating System:" && cat /etc/os-release
         echo "* Rust Compiler Version:" && rustc --version
         echo "* RustUp Version:" && rustup --version
+        echo "* RustUp Show:" && rustup show
         echo "* RustUp Toolchains Installed:" && rustup toolchain list
         echo "* RustUp Components Installed:" && rustup component list --installed
         echo "* RustUp Components Help:" && rustup component --help
@@ -64,8 +65,12 @@ jobs:
     - name: Install Rust Version '${{ matrix.rust-version }}'
       run: | 
         echo "* Requested Rust Compiler Version:" ${{ matrix.rust-version }}
+        echo "* Override Default Rust Compiler Version ..."
+        rustup override unset
+        rustup override set  ${{ matrix.rust-version }}
         rustup install ${{ matrix.rust-version }}
-        echo "*Rust Compiler Version:" && rustc --version
+        echo "* Rust Compiler Version:" && rustc --version
+        echo "* RustUp Show:" && rustup show
         
     - uses: actions/checkout@v2
 #    - name: Build
