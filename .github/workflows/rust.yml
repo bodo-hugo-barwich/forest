@@ -56,7 +56,7 @@ jobs:
         ls -lah ~/.cargo/bin
         echo "* Deleting Rust Binaries:"
         cd ~/.cargo/bin 
-        rm -f cargo cargo-audit cargo-clippy cargo-fmt cargo-miri cargo-outdated
+        rm -f cargo cargo-audit cargo-clippy cargo-fmt cargo-miri cargo-outdated clippy-driver
         rm -f rls rust-gdb rust-lldb rustdoc rustfmt
         echo "* Directory ~/.cargo/bin' Content 2 :"
         ls -lah ~/.cargo/bin
@@ -74,11 +74,14 @@ jobs:
         echo "* Rust Compiler Version:" && rustc --version
         echo "* RustUp Show:" && rustup show
         
+    # Check out the Project Code
     - uses: actions/checkout@v2
 
+    # Perform the Build Process
     - name: Build Release
       run: make release
 
+    # Run the assigned Tests
     - name: Run tests
       run: make test
 
