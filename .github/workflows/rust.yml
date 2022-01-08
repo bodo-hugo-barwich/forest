@@ -36,10 +36,10 @@ jobs:
     - name: Show Environment and Compiler Version
       run: | 
         echo "* Operating System:" && cat /etc/os-release
+        echo "* Rust Compiler Version:" && rustc --version
         echo "* RustUp Version:" && rustup --version
         echo "* RustUp Toolchains Installed:" && rustup toolchain list
         echo "* RustUp Components Installed:" && rustup component list --installed
-        echo "* Rust Compiler Version:" && rustc --version
         echo "* RustUp Components Help:" && rustup component --help
         
     # Uninstall previous Rust Version
@@ -48,8 +48,16 @@ jobs:
         echo "* Directory '~/.cargo/bin' Content 0 :"
         ls -lah ~/.cargo/bin
         echo "* Uninstalling Rust Compiler:"
+        rustup component remove cargo-x86_64-unknown-linux-gnu
+        rustup component remove clippy-x86_64-unknown-linux-gnu
         rustup component remove rustfmt-x86_64-unknown-linux-gnu
         echo "* Directory ~/.cargo/bin' Content 1 :"
+        ls -lah ~/.cargo/bin
+        echo "* Deleting Rust Binaries:"
+        cd ~/.cargo/bin 
+        rm -f cargo cargo-audit cargo-clippy cargo-fmt cargo-miri cargo-outdated
+        rm -f rls rust-gdb rust-lldb rustdoc rustfmt
+        echo "* Directory ~/.cargo/bin' Content 2 :"
         ls -lah ~/.cargo/bin
         
     # Install Rust Version according to Test Matrix
