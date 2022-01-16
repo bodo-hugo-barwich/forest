@@ -986,13 +986,19 @@ impl Actor {
                     })?;
 
                 // Check proof, we fail if validation succeeds.
-                if verify_windowed_post(rt, target_deadline.challenge, &sector_infos, proofs)? {
-                    return Err(actor_error!(
-                        ErrIllegalArgument,
-                        "failed to dispute valid post"
-                    ));
-                } else {
-                    info!("Successfully disputed post- window post was invalid");
+                match verify_windowed_post(rt, target_deadline.challenge, &sector_infos, proofs) {
+                    Err(e) => {
+                        info!("Successfully disputed post: {}", e);
+                    }
+                    Ok(false) => {
+                        info!("Successfully disputed post: window post was invalid");
+                    }
+                    Ok(true) => {
+                        return Err(actor_error!(
+                            ErrIllegalArgument,
+                            "failed to dispute valid post"
+                        ));
+                    }
                 }
 
                 // Ok, now we record faults. This always works because
@@ -1248,8 +1254,7 @@ impl Actor {
         rt.transaction(|state: &mut State, rt|{
             // Aggregate fee applies only when batching.
             if params.sectors.len() > 1 {
-                let aggregate_fee = aggregate_pre_commit_network_fee(params.sectors.len() as i64, rt.base_fee());
-                // AggregateFee applied to fee debt to consolidate burn with outstanding debts
+                let aggregate_fee = aggregate_pre_commit_network_fee(params.sectors.len() as i64, rt.base_fee());                // AggregateFee applied to fee debt to consolidate burn with outstanding debts
                 state.apply_penalty(&aggregate_fee)
                 .map_err(|e| {
                     actor_error!(
