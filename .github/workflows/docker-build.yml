@@ -20,12 +20,6 @@ jobs:
     # The type of runner that the job will run on
     runs-on: ubuntu-20.04
     
-#    env:
-      # Environment Variables for the Indexation Script
-#      ES_TEST: "elasticsearch:9200"
-#      HARNESS_ACTIVE: 0
-#      TEST_VERBOSE: 0
-
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:        
       # Start Docker Engine
@@ -45,7 +39,7 @@ jobs:
           ls -lah
         
       # Build Container Images
-      - name: Build Container Images with 'docker-compose'
+      - name: Build Container Image with Docker
         run: |
           echo "Docker: Image building ..."
           docker build -t forest -f ./Dockerfile .
