@@ -1,4 +1,4 @@
-name: Testing on Ubuntu
+name: Testing against Compiler Versions
 
 on:
   pull_request:
@@ -11,7 +11,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  ubuntu-testing:
+  compiler-version-testing:
 
     runs-on: ubuntu-20.04
     strategy:
@@ -81,6 +81,12 @@ jobs:
     # Perform the Build Process
     - name: Build Project
       run: make build
+        
+    # Check Service Version
+    - name: Show Service Release Version
+      run: |
+        echo "Service 'forest' Version:"
+        target/debug/forest --version      
 
     # Run the assigned Tests
     - name: Run tests
