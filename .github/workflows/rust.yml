@@ -1,94 +1,149 @@
-name: Testing against Compiler Versions
+name: Rust
 
 on:
   pull_request:
-    branches: [ main ]
-  workflow_dispatch:
-     branches:    
-      - main  
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  schedule:
+    -
+      cron: "0 0 * * *"
 
 env:
-  CARGO_TERM_COLOR: always
+  CI: 1
+  CARGO_INCREMENTAL: 1
 
 jobs:
-  compiler-version-testing:
+  test:
+    name: Test
+    runs-on: buildjet-16vcpu-ubuntu-2004
+    steps:
+      - name: Cancel Previous Runs
+        uses: styfle/cancel-workflow-action@0.9.1
+        with:
+          access_token: ${{ github.token }}
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+              curl file gcc g++ git make openssh-client \
+              autoconf automake cmake libtool libcurl4-openssl-dev libssl-dev llvm\
+              libelf-dev libdw-dev binutils-dev zlib1g-dev libiberty-dev wget \
+              xz-utils pkg-config python libclang-6.0-dev clang ocl-icd-opencl-dev libgflags-dev libhwloc-dev
+      - name: Checkout Sources
+        uses: actions/checkout@v2
+      - name: Install Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v1.3.0
+      - name: Cargo Check
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+      - name: Make Test-All
+        run: make test-all
 
-    runs-on: ubuntu-20.04
+  codecov:
+    name: Cover
+    runs-on: buildjet-16vcpu-ubuntu-2004
+    steps:
+      - name: Cancel Previous Runs
+        uses: styfle/cancel-workflow-action@0.9.1
+        with:
+          access_token: ${{ github.token }}
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+              curl file gcc g++ git make openssh-client \
+              autoconf automake cmake libtool libcurl4-openssl-dev libssl-dev llvm\
+              libelf-dev libdw-dev binutils-dev zlib1g-dev libiberty-dev wget \
+              xz-utils pkg-config python libclang-6.0-dev clang ocl-icd-opencl-dev libgflags-dev libhwloc-dev
+      - name: Checkout Sources
+        uses: actions/checkout@v2
+      - name: Install Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v1.3.0
+      - name: Run Tarpaulin
+        uses: actions-rs/tarpaulin@v0.1
+        with:
+          args: '--workspace --release --locked --out Xml --jobs 16 --timeout 600 -- --test-threads 16'
+      - name: Upload CodeCov
+        uses: codecov/codecov-action@v2
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Sources
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v1.3.0
+      - name: Install Clippy
+        run: rustup component add clippy
+      - name: Install RustFmt
+        run: rustup component add rustfmt
+      - name: Run Linters
+        run: make lint
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Sources
+        uses: actions/checkout@v2
+      - name: Install Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v1.3.0
+      - name: Install Audit
+        run: cargo install cargo-audit
+      - name: Run Audit
+        uses: actions-rs/cargo@v1
+        with:
+          command: audit
+          args: --ignore RUSTSEC-2020-0159 --ignore RUSTSEC-2020-0071 --ignore RUSTSEC-2021-0130 --ignore RUSTSEC-2022-0009
+
+  build:
+    name: Build
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # 1.48.0, 1.50.0, 1.52.0, 
-        rust-version: [1.53.0, 1.54.0, 1.55.0, 1.57.0]
-
+        os: [ubuntu-latest, macos-latest]
+        rv: [1.57.0, stable]
     steps:
-    # List all installed Rust Libraries
-    - name: List all installed Rust Libraries
-      run: |
-        dpkg --get-selections | grep -i rust | wc -l 
-        dpkg --get-selections | grep -i rust | sort
-        
-    # List all available Rust Libraries
-    - name: List available Rust Libraries
-      run: |
-        cat /etc/apt/sources.list
-        sudo apt-get update 
-        apt-cache search rust | sort
-        
-    # Show Environment and Compiler Version
-    - name: Show Environment and Compiler Version
-      run: | 
-        echo "* Operating System:" && cat /etc/os-release
-        echo "* Rust Compiler Version:" && rustc --version
-        echo "* RustUp Version:" && rustup --version
-        echo "* RustUp Show:" && rustup show
-        echo "* RustUp Toolchains Installed:" && rustup toolchain list
-        echo "* RustUp Components Installed:" && rustup component list --installed
-        echo "* RustUp Components Help:" && rustup component --help
-        
-    # Uninstall previous Rust Version
-    - name: Uninstall Preinstalled Rust Version
-      run: | 
-        echo "* Directory '~/.cargo/bin' Content 0 :"
-        ls -lah ~/.cargo/bin
-        echo "* Uninstalling Rust Compiler:"
-        rustup component remove cargo-x86_64-unknown-linux-gnu
-        rustup component remove clippy-x86_64-unknown-linux-gnu
-        rustup component remove rustfmt-x86_64-unknown-linux-gnu
-        echo "* Directory ~/.cargo/bin' Content 1 :"
-        ls -lah ~/.cargo/bin
-        echo "* Deleting Rust Binaries:"
-        cd ~/.cargo/bin 
-        rm -f cargo cargo-audit cargo-clippy cargo-fmt cargo-miri cargo-outdated clippy-driver
-        rm -f rls rust-gdb rust-lldb rustdoc rustfmt
-        echo "* Directory ~/.cargo/bin' Content 2 :"
-        ls -lah ~/.cargo/bin
-        
-    # Install Rust Version according to Test Matrix
-    - name: Install Rust Version '${{ matrix.rust-version }}'
-      run: | 
-        echo "* Requested Rust Compiler Version:" ${{ matrix.rust-version }}
-        echo "* Unset Rust Compiler Overrides ..."
-        rustup override unset
-        echo "* Override Default Rust Compiler Version ..."
-        rustup override set  ${{ matrix.rust-version }}
-        echo "* Install Rust Compiler requested Version ..."
-        rustup install ${{ matrix.rust-version }}
-        echo "* Rust Compiler Version:" && rustc --version
-        echo "* RustUp Show:" && rustup show
-        
-    # Check out the Project Code
-    - uses: actions/checkout@v2
-
-    # Perform the Build Process
-    - name: Build Project
-      run: make build
-        
-    # Check Service Version
-    - name: Show Service Release Version
-      run: |
-        echo "Service 'forest' Version:"
-        target/debug/forest --version      
-
-    # Run the assigned Tests
-    - name: Run tests
-      run: make test
-
+      - name: Cancel Previous Runs
+        uses: styfle/cancel-workflow-action@0.9.1
+        with:
+          access_token: ${{ github.token }}
+      - name: Checkout Sources
+        uses: actions/checkout@v2
+      - name: Install Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rv }}
+          override: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v1.3.0
+      - name: Cargo Build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --profile dev
