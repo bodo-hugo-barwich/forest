@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use async_std::sync::RwLock;
-use git_version::git_version;
 use lazy_static::lazy_static;
 use num_derive::FromPrimitive;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
+pub use forest_git_utils::CURRENT_COMMIT;
 use serde::Serialize;
 const BUILD_VERSION: &str = "0.10.2";
 
@@ -22,7 +22,6 @@ const MINER_API_VERSION: Version = new_version(0, 15, 0);
 const WORKER_API_VERSION: Version = new_version(0, 15, 0);
 
 lazy_static! {
-    pub static ref CURRENT_COMMIT: String = git_version!(fallback = "unknown").to_string();
     pub static ref BUILD_TYPE: RwLock<BuildType> = RwLock::new(BuildType::BuildDefault);
     pub static ref RUNNING_NODE_TYPE: RwLock<NodeType> = RwLock::new(NodeType::Full);
 }
@@ -51,7 +50,7 @@ pub enum BuildType {
 }
 
 /// The type of node that is running.
-#[derive(FromPrimitive)]
+#[derive(FromPrimitive, Debug)]
 #[repr(u64)]
 pub enum NodeType {
     Unknown = 0,
@@ -62,7 +61,7 @@ pub enum NodeType {
 
 impl Display for NodeType {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", self)
+        write!(f, "{:?}", self)
     }
 }
 
@@ -82,7 +81,7 @@ const fn new_version(major: u32, minor: u32, patch: u32) -> Version {
 
 /// Gets the formatted current user version.
 pub async fn user_version() -> String {
-    BUILD_VERSION.to_owned() + &*BUILD_TYPE.read().await.to_str() + &CURRENT_COMMIT
+    BUILD_VERSION.to_owned() + BUILD_TYPE.read().await.to_str() + &CURRENT_COMMIT
 }
 
 impl Version {

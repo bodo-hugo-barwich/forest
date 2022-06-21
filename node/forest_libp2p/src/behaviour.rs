@@ -18,7 +18,6 @@ use forest_cid::Cid;
 use forest_encoding::blake2b_256;
 use futures::channel::oneshot::{self, Sender as OneShotSender};
 use futures::{prelude::*, stream::FuturesUnordered};
-use git_version::git_version;
 use libp2p::ping::{Ping, PingEvent};
 use libp2p::request_response::{
     ProtocolSupport, RequestId, RequestResponse, RequestResponseConfig, RequestResponseEvent,
@@ -56,7 +55,6 @@ use tiny_cid::Cid as Cid2;
 
 lazy_static! {
     static ref VERSION: &'static str = env!("CARGO_PKG_VERSION");
-    static ref CURRENT_COMMIT: &'static str = git_version!();
 }
 
 /// Libp2p behaviour for the Forest node. This handles all sub protocols needed for a Filecoin node.

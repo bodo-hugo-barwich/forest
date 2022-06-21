@@ -6,7 +6,7 @@ use crate::network::EPOCHS_IN_HOUR;
 use address::Address;
 use clock::ChainEpoch;
 use crypto::Signature;
-use encoding::{error::Error, serde_bytes, to_vec, tuple::*};
+use encoding::{serde_bytes, to_vec, tuple::*, Error};
 use num_bigint::{bigint_ser, BigInt};
 use vm::{MethodNum, Serialized};
 
@@ -28,7 +28,7 @@ pub struct ConstructorParams {
 
 /// A voucher is sent by `from` to `to` off-chain in order to enable
 /// `to` to redeem payments on-chain in the future
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
 pub struct SignedVoucher {
     /// ChannelAddr is the address of the payment channel this signed voucher is valid for
     pub channel_addr: Address,
@@ -97,7 +97,7 @@ impl SignedVoucher {
 }
 
 /// Modular Verification method
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
 pub struct ModVerifyParams {
     pub actor: Address,
     pub method: MethodNum,

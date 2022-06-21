@@ -1,0 +1,83 @@
+name: Build Docker Image
+
+on:
+  pull_request:
+    branches: [ main ]
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build-image:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-20.04
+    
+    steps:        
+      - name: Install Python Dependencies
+        run: sudo apt-get update && sudo apt-get install python3-pygit2 python3-toml
+
+      - name: Docker Engine Status
+        run: |
+          sudo systemctl status docker -l
+          
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v2
+
+      - name: Listing Directory Contents
+        run: |
+          echo 'User:' $(whoami) 
+          echo 'Working Directory:' $(pwd) 
+          echo 'Directory Content:' 
+          ls -lah
+        
+      # Build Container Images
+      - name: Build Container Image with Docker
+        run: |
+          echo "Git: 'CURRENT_COMMIT' serializing ..."
+          scripts/serialize_commit.py --debug          
+          echo "Docker: Image building ..."
+          docker build -t forest -f ./Dockerfile .
+          echo "Docker: Images listing ..."
+          docker image ls
+          docker image inspect forest
+          
+      # Check Service Version
+      - name: Check 'forest' Service Version
+        run: |
+          echo "Docker: Service 'forest' Version:"
+          forest_version=`docker run -i forest forest --version`
+          echo "$forest_version"
+          forest_commit=`echo "$forest_version" | cut -d/ -f4`
+          serialize_commit=`cat config_forest_commit.toml | grep -ioE 'short = "[^"]+"' | cut -d'"' -f2`
+          echo -e "Git: 'CURRENT_COMMIT' serialized:\n$serialize_commit"          
+          if [ "$forest_commit" != "$serialize_commit" ]; then echo "Git: 'CURRENT_COMMIT' is missing!" ; exit 1 ; fi ;
+        
+      # Start the Service Container
+      - name: Start 'forest' Service as Docker Container
+        run: |
+          work_dir=$(pwd)
+          mkdir -p test_dir/.keys test_dir/temp 
+          ls -lah -R test_dir/ 
+          echo "Docker: Service 'forest' starting ..."
+          docker run -e FULLNODE_API_INFO="/ip4/127.0.0.1/tcp/1234/http" -v $work_dir/test_dir/.keys/:/root/.forest/:Z -v $work_dir/test_dir/temp/:/var/tmp/:Z -dt forest forest --encrypt-keystore false
+          
+      # Check Container Health
+      - name: Check Container Health
+        run: |
+          con_stat=`docker ps 2>&1` 
+          echo -e "Container Status Complete:\n$con_stat" 
+          con_id=`echo "$con_stat" | grep -i forest | awk '{print $1}'`
+          echo -e "Docker: Service 'forest' ID:\n$con_id"
+          echo "Docker: Service 'forest' Log:"
+          docker logs $con_id
+          
+      # Check Operativity with the CLI Functionality
+      - name: Check Operativity with CLI
+        run: |
+          con_id=`docker ps | grep -i forest | awk '{print $1}'`
+          docker exec -e FULLNODE_API_INFO="/ip4/127.0.0.1/tcp/1234/http" -t $con_id forest --encrypt-keystore false auth api-info -p admin
+        
+      # Stop the Service Container
+      - name: Stop 'forest' Service Container
+        run: |
+          con_id=`docker ps | grep -i forest | awk '{print $1}'`
+          docker stop $con_id
