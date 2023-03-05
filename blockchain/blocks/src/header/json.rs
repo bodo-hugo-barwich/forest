@@ -1,19 +1,20 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
+
+use forest_beacon::beacon_entries;
+use forest_json::{sector, signature};
+use forest_shim::sector::PoStProof;
+use serde::{de, Deserialize, Serialize};
 
 use super::*;
 use crate::{election_proof, ticket, tipset::tipset_keys_json};
-use beacon::beacon_entries;
-use crypto::signature;
-use fil_types::sector::post;
-use serde::{de, Deserialize, Serialize};
 
 // Wrapper for serializing and deserializing a BlockHeader from JSON.
 #[derive(Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct BlockHeaderJson(#[serde(with = "self")] pub BlockHeader);
 
-/// Wrapper for serializing a BlockHeader reference to JSON.
+/// Wrapper for serializing a `BlockHeader` reference to JSON.
 #[derive(Serialize)]
 #[serde(transparent)]
 pub struct BlockHeaderJsonRef<'a>(#[serde(with = "self")] pub &'a BlockHeader);
@@ -38,18 +39,18 @@ where
         election_proof: &'a Option<ElectionProof>,
         #[serde(with = "beacon_entries::json::vec")]
         beacon_entries: &'a [BeaconEntry],
-        #[serde(rename = "WinPoStProof", with = "post::json::vec")]
+        #[serde(rename = "WinPoStProof", with = "sector::json::vec")]
         winning_post_proof: &'a [PoStProof],
         #[serde(rename = "Parents", with = "tipset_keys_json")]
         parents: &'a TipsetKeys,
         #[serde(rename = "ParentWeight")]
         weight: String,
         height: &'a i64,
-        #[serde(rename = "ParentStateRoot", with = "cid::json")]
+        #[serde(rename = "ParentStateRoot", with = "forest_json::cid")]
         state_root: &'a Cid,
-        #[serde(rename = "ParentMessageReceipts", with = "cid::json")]
+        #[serde(rename = "ParentMessageReceipts", with = "forest_json::cid")]
         message_receipts: &'a Cid,
-        #[serde(with = "cid::json")]
+        #[serde(with = "forest_json::cid")]
         messages: &'a Cid,
         #[serde(rename = "BLSAggregate", with = "signature::json::opt")]
         bls_aggregate: &'a Option<Signature>,
@@ -65,7 +66,7 @@ where
         miner: m.miner_address.to_string(),
         ticket: &m.ticket,
         election_proof: &m.election_proof,
-        winning_post_proof: &m.winning_post_proof,
+        winning_post_proof: m.winning_post_proof.as_slice(),
         parents: &m.parents,
         weight: m.weight.to_string(),
         height: &m.epoch,
@@ -77,7 +78,7 @@ where
         beacon_entries: &m.beacon_entries,
         signature: &m.signature,
         fork_signal: &m.fork_signal,
-        parent_base_fee: m.parent_base_fee.to_string(),
+        parent_base_fee: m.parent_base_fee.atto().to_string(),
     }
     .serialize(serializer)
 }
@@ -96,18 +97,18 @@ where
         election_proof: Option<ElectionProof>,
         #[serde(default, with = "beacon_entries::json::vec")]
         beacon_entries: Vec<BeaconEntry>,
-        #[serde(default, rename = "WinPoStProof", with = "post::json::vec")]
+        #[serde(default, rename = "WinPoStProof", with = "sector::json::vec")]
         winning_post_proof: Vec<PoStProof>,
         #[serde(rename = "Parents", with = "tipset_keys_json")]
         parents: TipsetKeys,
         #[serde(rename = "ParentWeight")]
         weight: String,
         height: i64,
-        #[serde(rename = "ParentStateRoot", with = "cid::json")]
+        #[serde(rename = "ParentStateRoot", with = "forest_json::cid")]
         state_root: Cid,
-        #[serde(rename = "ParentMessageReceipts", with = "cid::json")]
+        #[serde(rename = "ParentMessageReceipts", with = "forest_json::cid")]
         message_receipts: Cid,
-        #[serde(with = "cid::json")]
+        #[serde(with = "forest_json::cid")]
         messages: Cid,
         #[serde(default, rename = "BLSAggregate", with = "signature::json::opt")]
         bls_aggregate: Option<Signature>,
@@ -137,15 +138,21 @@ where
         .signature(v.signature)
         .bls_aggregate(v.bls_aggregate)
         .election_proof(v.election_proof)
-        .parent_base_fee(v.parent_base_fee.parse().map_err(de::Error::custom)?)
+        .parent_base_fee(
+            v.parent_base_fee
+                .parse::<BigInt>()
+                .map(TokenAmount::from_atto)
+                .map_err(de::Error::custom)?,
+        )
         .build()
         .map_err(de::Error::custom)
 }
 
 pub mod vec {
-    use super::*;
-    use forest_json_utils::GoVecVisitor;
+    use forest_utils::json::GoVecVisitor;
     use serde::ser::SerializeSeq;
+
+    use super::*;
 
     pub fn serialize<S>(m: &[BlockHeader], serializer: S) -> Result<S::Ok, S::Error>
     where

@@ -1,33 +1,44 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use super::errors::Error;
-use crate::provider::Provider;
-use crate::utils::{get_gas_perf, get_gas_reward};
-use address::Address;
-use async_std::sync::RwLock;
-use blocks::Tipset;
-use encoding::Cbor;
+use std::{
+    cmp::Ordering,
+    mem,
+    ops::{Index, IndexMut},
+};
+
+use ahash::HashMap;
+use forest_blocks::Tipset;
+use forest_message::{Message, SignedMessage};
+use forest_networks::ChainConfig;
+use forest_shim::{
+    address::Address,
+    econ::TokenAmount,
+    gas::{price_list_by_network_version, Gas},
+};
+use fvm_ipld_encoding::Cbor;
 use log::warn;
-use message::{Message, SignedMessage};
-use num_bigint::BigInt;
+use num_traits::Zero;
 use slotmap::{new_key_type, SlotMap};
-use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::mem;
-use std::ops::{Index, IndexMut};
+
+use super::errors::Error;
+use crate::{
+    provider::Provider,
+    utils::{get_gas_perf, get_gas_reward},
+};
 
 new_key_type! {
     pub struct NodeKey;
 }
 
 /// Chains is an abstraction of a list of message chain nodes.
-/// It wraps a slotmap instance. key_vec is an additional requirement in order to satisfy
-/// optimal msg selection use cases, such as iteration in insertion order.
-/// The slotamap serves as a lookup table for nodes to get around the borrow checker rules.
-/// Each MsgChainNode contains only pointers as `NodeKey` to the entries in the map
-/// With this design, we get around the borrow checker rule issues when
-/// implementing the optimal selection algorithm.
+/// It wraps a `SlotMap` instance. `key_vec` is an additional requirement in
+/// order to satisfy optimal `msg` selection use cases, such as iteration in
+/// insertion order. The `SlotMap` serves as a lookup table for nodes to get
+/// around the borrow checker rules. Each `MsgChainNode` contains only pointers
+/// as `NodeKey` to the entries in the map With this design, we get around the
+/// borrow checker rule issues when implementing the optimal selection
+/// algorithm.
 pub(crate) struct Chains {
     pub map: SlotMap<NodeKey, MsgChainNode>,
     pub key_vec: Vec<NodeKey>,
@@ -41,13 +52,15 @@ impl Chains {
         }
     }
 
-    /// Pushes a msg chain node into slotmap and places the key in the `node_vec` passed as parameter.
+    /// Pushes a `msg` chain node into slot map and places the key in the
+    /// `node_vec` passed as parameter.
     pub(crate) fn push_with(&mut self, cur_chain: MsgChainNode, node_vec: &mut Vec<NodeKey>) {
         let key = self.map.insert(cur_chain);
         node_vec.push(key);
     }
 
-    /// Sorts the chains with `compare` method. If rev is true, sorts in descending order.
+    /// Sorts the chains with `compare` method. If rev is true, sorts in
+    /// descending order.
     pub(crate) fn sort(&mut self, rev: bool) {
         // replace dance to get around borrow checker
         let mut chains = mem::take(&mut self.key_vec);
@@ -74,7 +87,7 @@ impl Chains {
         let _ = mem::replace(&mut self.key_vec, chains);
     }
 
-    // Sort by effective perf on a range
+    // Sort by effective `perf` on a range
     pub(crate) fn sort_range_effective(&mut self, range: std::ops::RangeFrom<usize>) {
         let mut chains = mem::take(&mut self.key_vec);
         chains[range].sort_by(|a, b| {
@@ -86,17 +99,18 @@ impl Chains {
         let _ = mem::replace(&mut self.key_vec, chains);
     }
 
-    /// Retrieves the msg chain node by the given NodeKey
+    /// Retrieves the `msg` chain node by the given `NodeKey`
     pub(crate) fn get_mut(&mut self, k: NodeKey) -> Option<&mut MsgChainNode> {
         self.map.get_mut(k)
     }
 
-    /// Retrieves the msg chain node by the given NodeKey along with the data
-    /// required from previous chain (if exists) to set effective performance of this node.
+    /// Retrieves the `msg` chain node by the given `NodeKey` along with the
+    /// data required from previous chain (if exists) to set effective
+    /// performance of this node.
     pub(crate) fn get_mut_with_prev_eff(
         &mut self,
         k: NodeKey,
-    ) -> (Option<&mut MsgChainNode>, Option<(f64, i64)>) {
+    ) -> (Option<&mut MsgChainNode>, Option<(f64, u64)>) {
         let node = self.map.get(k);
         let prev = if let Some(node) = node {
             if let Some(prev_key) = node.prev {
@@ -113,19 +127,15 @@ impl Chains {
         (node, prev)
     }
 
-    /// Retrieves the msg chain node by the given NodeKey
+    /// Retrieves the `msg` chain node by the given `NodeKey`
     pub(crate) fn get(&self, k: NodeKey) -> Option<&MsgChainNode> {
         self.map.get(k)
     }
 
-    /// Retrieves the msg chain node at the given index
+    /// Retrieves the `msg` chain node at the given index
     pub(crate) fn get_mut_at(&mut self, i: usize) -> Option<&mut MsgChainNode> {
-        if i < self.key_vec.len() {
-            let key = self.key_vec[i];
-            self.get_mut(key)
-        } else {
-            None
-        }
+        let key = self.key_vec.get(i)?;
+        self.get_mut(*key)
     }
 
     // Retrieves a msg chain node at the given index in the provided NodeKey vec
@@ -140,17 +150,12 @@ impl Chains {
 
     // Retrieves the node key at the given index
     pub(crate) fn get_key_at(&self, i: usize) -> Option<NodeKey> {
-        if i < self.key_vec.len() {
-            Some(self.key_vec[i])
-        } else {
-            None
-        }
+        self.key_vec.get(i).copied()
     }
 
-    /// Retrieves the msg chain node at the given index
+    /// Retrieves the `msg` chain node at the given index
     pub(crate) fn get_at(&mut self, i: usize) -> Option<&MsgChainNode> {
-        let key = self.key_vec[i];
-        self.map.get(key)
+        self.map.get(self.get_key_at(i)?)
     }
 
     /// Retrieves the amount of items.
@@ -158,17 +163,20 @@ impl Chains {
         self.map.len()
     }
 
-    /// Returns true is the chain is empty and otherwise. We check the map as the source of truth
-    /// as key_vec can be extended time to time.
+    /// Returns true is the chain is empty and otherwise. We check the map as
+    /// the source of truth as `key_vec` can be extended time to time.
     pub(crate) fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
-    /// Removes messages from the given index and resets effective perfs
-    pub(crate) fn trim_msgs_at(&mut self, idx: usize, gas_limit: i64, base_fee: &BigInt) {
-        let prev = self
-            .get_at(if idx == 0 { return } else { idx - 1 })
-            .map(|prev| (prev.eff_perf, prev.gas_limit));
+    /// Removes messages from the given index and resets effective `perfs`
+    pub(crate) fn trim_msgs_at(&mut self, idx: usize, gas_limit: u64, base_fee: &TokenAmount) {
+        let prev = match idx {
+            0 => None,
+            _ => self
+                .get_at(idx - 1)
+                .map(|prev| (prev.eff_perf, prev.gas_limit)),
+        };
         let chain_node = self.get_mut_at(idx).unwrap();
         let mut i = chain_node.msgs.len() as i64 - 1;
 
@@ -247,12 +255,12 @@ impl IndexMut<usize> for Chains {
     }
 }
 
-/// Represents a node in the MsgChain.
+/// Represents a node in the `MsgChain`.
 #[derive(Clone, Debug)]
 pub struct MsgChainNode {
     pub msgs: Vec<SignedMessage>,
-    pub gas_reward: BigInt,
-    pub gas_limit: i64,
+    pub gas_reward: TokenAmount,
+    pub gas_limit: u64,
     pub gas_perf: f64,
     pub eff_perf: f64,
     pub bp: f64,
@@ -299,7 +307,7 @@ impl MsgChainNode {
         }
     }
 
-    pub fn set_eff_perf(&mut self, prev: Option<(f64, i64)>) {
+    pub fn set_eff_perf(&mut self, prev: Option<(f64, u64)>) {
         let mut eff_perf = self.gas_perf * self.bp;
         if let Some(prev) = prev {
             if eff_perf > 0.0 {
@@ -320,7 +328,7 @@ impl std::default::Default for MsgChainNode {
     fn default() -> Self {
         Self {
             msgs: vec![],
-            gas_reward: BigInt::default(),
+            gas_reward: TokenAmount::zero(),
             gas_limit: 0,
             gas_perf: 0.0,
             eff_perf: 0.0,
@@ -334,13 +342,14 @@ impl std::default::Default for MsgChainNode {
     }
 }
 
-pub(crate) async fn create_message_chains<T>(
-    api: &RwLock<T>,
+pub(crate) fn create_message_chains<T>(
+    api: &T,
     actor: &Address,
     mset: &HashMap<u64, SignedMessage>,
-    base_fee: &BigInt,
+    base_fee: &TokenAmount,
     ts: &Tipset,
     chains: &mut Chains,
+    chain_config: &ChainConfig,
 ) -> Result<(), Error>
 where
     T: Provider,
@@ -350,15 +359,16 @@ where
     msgs.sort_by_key(|v| v.sequence());
 
     // sanity checks:
-    // - there can be no gaps in nonces, starting from the current actor nonce
-    //   if there is a gap, drop messages after the gap, we can't include them
-    // - all messages must have minimum gas and the total gas for the candidate messages
-    //   cannot exceed the block limit; drop all messages that exceed the limit
-    // - the total gasReward cannot exceed the actor's balance; drop all messages that exceed
-    //   the balance
-    let actor_state = api.read().await.get_actor_after(actor, ts)?;
+    // - there can be no gaps in nonces, starting from the current actor nonce if
+    //   there is a gap, drop messages after the gap, we can't include them
+    // - all messages must have minimum gas and the total gas for the candidate
+    //   messages cannot exceed the block limit; drop all messages that exceed the
+    //   limit
+    // - the total gasReward cannot exceed the actor's balance; drop all messages
+    //   that exceed the balance
+    let actor_state = api.get_actor_after(actor, ts)?;
     let mut cur_seq = actor_state.sequence;
-    let mut balance = actor_state.balance;
+    let mut balance: TokenAmount = TokenAmount::from(&actor_state.balance);
 
     let mut gas_limit = 0;
     let mut skip = 0;
@@ -384,15 +394,17 @@ where
         }
         cur_seq += 1;
 
-        let min_gas = interpreter::price_list_by_epoch(ts.epoch())
+        let network_version = chain_config.network_version(ts.epoch());
+
+        let min_gas = price_list_by_network_version(network_version)
             .on_chain_message(m.marshal_cbor()?.len())
             .total();
 
-        if m.gas_limit() < min_gas {
+        if Gas::new(m.gas_limit()) < min_gas {
             break;
         }
         gas_limit += m.gas_limit();
-        if gas_limit > types::BLOCK_GAS_LIMIT {
+        if gas_limit > fvm_shared3::BLOCK_GAS_LIMIT {
             break;
         }
 
@@ -437,7 +449,8 @@ where
         }
     };
 
-    // creates msg chain nodes in chunks based on gas_perf obtained from the current chain's gas limit.
+    // creates msg chain nodes in chunks based on gas_perf obtained from the current
+    // chain's gas limit.
     for (i, m) in msgs.into_iter().enumerate() {
         if i == 0 {
             cur_chain = new_chain(m, i);
@@ -448,8 +461,8 @@ where
         let gas_limit = cur_chain.gas_limit + m.gas_limit();
         let gas_perf = get_gas_perf(&gas_reward, gas_limit);
 
-        // try to add the message to the current chain -- if it decreases the gasPerf, then make a
-        // new chain
+        // try to add the message to the current chain -- if it decreases the gasPerf,
+        // then make a new chain
         if gas_perf < cur_chain.gas_perf {
             chains.push_with(cur_chain, &mut node_vec);
             cur_chain = new_chain(m, i);

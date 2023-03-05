@@ -1,56 +1,68 @@
 [package]
 name = "forest_libp2p"
-version = "0.1.0"
-authors = ["ChainSafe Systems <info@chainsafe.io>"]
-edition = "2018"
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
 
 [dependencies]
-utils = { path = "../utils" }
-networks = { path = "../../types/networks" }
-libp2p = { version = "0.40.0-rc.1" , default-features = false, features = [
-    "gossipsub",
-    "kad",
-    "identify",
-    "ping",
-    "mdns",
-    "noise",
-    "yamux",
-    "tcp-async-io",
-    "dns-async-std",
-    "mplex",
-    "request-response",
-    "websocket"
+ahash.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+cid = { workspace = true, default-features = false, features = ["std"] }
+flume.workspace = true
+forest_blocks.workspace = true
+forest_chain.workspace = true
+forest_db.workspace = true
+forest_encoding.workspace = true
+forest_libp2p_bitswap = { workspace = true, features = ["tokio"] }
+forest_message.workspace = true
+forest_metrics.workspace = true
+forest_networks.workspace = true
+forest_shim.workspace = true
+forest_utils.workspace = true
+futures-util.workspace = true
+futures.workspace = true
+fvm_ipld_blockstore.workspace = true
+fvm_ipld_car.workspace = true
+fvm_ipld_encoding.workspace = true
+fvm_shared = { workspace = true, default-features = false, features = ["testing"] }
+lazy_static.workspace = true
+libp2p = { workspace = true, default-features = false, features = [
+  "gossipsub",
+  "kad",
+  "identify",
+  "ping",
+  "mdns",
+  "noise",
+  "yamux",
+  "tcp",
+  "websocket",
+  "dns",
+  "request-response",
+  "metrics",
+  "tokio",
+  "macros",
 ] }
-multihash = { version = "0.13", default-features = false, features = ["std", "multihash-impl", "identity", "sha2"] }
-futures = "0.3.5"
-futures-util = "0.3.5"
-asynchronous-codec = "0.6.0"
-log = "0.4.8"
-async-std = "1.9"
-serde = { version = "1.0", features = ["derive"] }
-forest_blocks = { path = "../../blockchain/blocks" }
-forest_message = "0.7"
-forest_encoding = "0.2.1"
-forest_cid = { version = "0.3" }
-bytes = "1.0"
-fnv = "1.0.6"
-smallvec = "1.1.0"
-chain = { path = "../../blockchain/chain" }
-clock = { package = "fil_clock", path = "../clock" }
-db = { package = "forest_db", version = "0.1" }
-forest_car = { path = "../../ipld/car" }
-num-bigint = { path = "../../utils/bigint", package = "forest_bigint" }
-libp2p-bitswap = { git = "https://github.com/ChainSafe/libp2p-bitswap", rev = "8d3913ea7fc1e693776c83eecc7a9675c3426446" }
-tiny-cid = "0.2.0"
-ipld_blockstore = "0.1"
-async-trait = "0.1"
-lazy_static = "1.4"
-futures_cbor_codec = "0.3.1"
-git-version = "0.3.4"
+log.workspace = true
+multihash = { workspace = true, default-features = false, features = ["std", "multihash-impl", "identity", "sha2"] }
+num.workspace = true
+pin-project-lite.workspace = true
+prometheus.workspace = true
+quickcheck.workspace = true
+rand.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_ipld_dagcbor.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tokio-stream.workspace = true
 
 [dev-dependencies]
-forest_address = "0.3"
-num-bigint = { path = "../../utils/bigint", package = "forest_bigint" }
-crypto = { package = "forest_crypto", version = "0.5", features = ["blst"] }
-genesis = { path = "../../utils/genesis", features = ["testing"] }
-async-std = { version = "1.9", features = ["attributes"] }
+forest_db.workspace = true
+forest_genesis = { workspace = true, features = ["testing"] }
+quickcheck.workspace = true
+quickcheck_macros.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+tokio-util = { workspace = true, features = ["compat"] }

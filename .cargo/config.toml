@@ -1,0 +1,39 @@
+[alias]
+b = "build"
+c = "check"
+d = "doc"
+t = "test"
+r = "run"
+
+[build]
+incremental = true
+# might be helpful but we don't enforce sccache installation atm
+# https://github.com/mozilla/sccache
+# rustc-wrapper = "sccache"
+
+# For details checkout https://jondot.medium.com/8-steps-for-troubleshooting-your-rust-build-times-2ffc965fd13e
+[target.x86_64-unknown-linux-gnu]
+# clang has been listed as prerequisite in the doc
+linker = "clang"
+# enable avx2 by default since it's avaiable on almost all x86_64 CPUs
+rustflags = ["-Ctarget-feature=+avx2,+fma", "-Zshare-generics=y", "--cfg", "tokio_unstable"]
+
+[target.x86_64-unknown-linux-musl]
+# clang has been listed as prerequisite in the doc
+linker = "clang"
+# enable avx2 by default since it's avaiable on almost all x86_64 CPUs
+rustflags = ["-Ctarget-feature=+avx2,+fma", "-Zshare-generics=y", "--cfg", "tokio_unstable"]
+
+[target.x86_64-apple-darwin]
+# zld might help here
+# brew install michaeleisel/zld/zld
+# "-Clink-arg=-fuse-ld=zld"
+# For details checkout https://jondot.medium.com/8-steps-for-troubleshooting-your-rust-build-times-2ffc965fd13e
+rustflags = ["-Zshare-generics=y", "--cfg", "tokio_unstable"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-Zshare-generics=y", "--cfg", "tokio_unstable"]
+
+[net]
+git-fetch-with-cli = true
+retry = 5

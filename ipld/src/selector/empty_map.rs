@@ -1,9 +1,10 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-// This is only used as a utility because go impl serializes no data as an empty map
+// This is only used as a utility because go impl serializes no data as an empty
+// map
 
 #[derive(Serialize, Deserialize)]
 struct EmptyMap {}

@@ -1,18 +1,17 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
+use chrono::{Duration, Utc};
+use forest_key_management::KeyInfo;
+use forest_shim::crypto::SignatureType;
 use jsonrpc_v2::Error as JsonRpcError;
-use jsonwebtoken::errors::Result as JWTResult;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header};
+use jsonwebtoken::{decode, encode, errors::Result as JWTResult, DecodingKey, EncodingKey, Header};
 use once_cell::sync::Lazy;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crypto::SignatureType;
-use wallet::KeyInfo;
-
-/// constant string that is used to identify the JWT secret key in KeyStore
+/// constant string that is used to identify the JWT secret key in `KeyStore`
 pub const JWT_IDENTIFIER: &str = "auth-jwt-private";
 /// Admin permissions
 pub static ADMIN: Lazy<Vec<String>> = Lazy::new(|| {
@@ -31,7 +30,7 @@ pub static WRITE: Lazy<Vec<String>> = Lazy::new(|| vec!["read".to_string(), "wri
 /// Reading permissions
 pub static READ: Lazy<Vec<String>> = Lazy::new(|| vec!["read".to_string()]);
 
-/// Error Enum for Authentication
+/// Error enumeration for Authentication
 #[derive(Debug, Error, Serialize, Deserialize)]
 pub enum Error {
     /// Filecoin Method does not exist
@@ -47,25 +46,28 @@ pub enum Error {
     Other(String),
 }
 
-/// Claim struct for JWT Tokens
+/// Claim structure for JWT Tokens
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     #[serde(rename = "Allow")]
     allow: Vec<String>,
+    // Expiration time (as UTC timestamp)
+    exp: usize,
 }
 
 /// Create a new JWT Token
-pub fn create_token(perms: Vec<String>, key: &[u8]) -> JWTResult<String> {
-    let payload = Claims { allow: perms };
+pub fn create_token(perms: Vec<String>, key: &[u8], token_exp: Duration) -> JWTResult<String> {
+    let exp_time = Utc::now() + token_exp;
+    let payload = Claims {
+        allow: perms,
+        exp: exp_time.timestamp() as usize,
+    };
     encode(&Header::default(), &payload, &EncodingKey::from_secret(key))
 }
 
 /// Verify JWT Token and return the allowed permissions from token
 pub fn verify_token(token: &str, key: &[u8]) -> JWTResult<Vec<String>> {
-    let validation = jsonwebtoken::Validation {
-        validate_exp: false,
-        ..Default::default()
-    };
+    let validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::default());
     let token = decode::<Claims>(token, &DecodingKey::from_secret(key), &validation)?;
     Ok(token.claims.allow)
 }
@@ -84,7 +86,7 @@ pub fn has_perms(header_raw: String, required: &str, key: &[u8]) -> Result<(), J
 
 pub fn generate_priv_key() -> KeyInfo {
     let priv_key = rand::thread_rng().gen::<[u8; 32]>();
-    // TODO temp use of bls key as placeholder, need to update keyinfo to use string instead of keyinfo
-    // for key type
+    // TODO temp use of bls key as placeholder, need to update keyinfo to use string
+    // instead of keyinfo for key type
     KeyInfo::new(SignatureType::BLS, priv_key.to_vec())
 }

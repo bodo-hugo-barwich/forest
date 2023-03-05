@@ -1,8 +1,8 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
+use ahash::{HashMap, HashMapExt};
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
 
 pub mod data_types;
 
@@ -28,33 +28,28 @@ pub static ACCESS_MAP: Lazy<HashMap<&str, Access>> = Lazy::new(|| {
 
     // Chain API
     access.insert(chain_api::CHAIN_GET_MESSAGE, Access::Read);
+    access.insert(chain_api::CHAIN_EXPORT, Access::Read);
     access.insert(chain_api::CHAIN_READ_OBJ, Access::Read);
     access.insert(chain_api::CHAIN_HAS_OBJ, Access::Read);
     access.insert(chain_api::CHAIN_GET_BLOCK_MESSAGES, Access::Read);
     access.insert(chain_api::CHAIN_GET_TIPSET_BY_HEIGHT, Access::Read);
     access.insert(chain_api::CHAIN_GET_GENESIS, Access::Read);
     access.insert(chain_api::CHAIN_HEAD, Access::Read);
-    access.insert(chain_api::CHAIN_HEAD_SUBSCRIPTION, Access::Read);
-    access.insert(chain_api::CHAIN_NOTIFY, Access::Read);
-    access.insert(chain_api::CHAIN_TIPSET_WEIGHT, Access::Read);
     access.insert(chain_api::CHAIN_GET_BLOCK, Access::Read);
     access.insert(chain_api::CHAIN_GET_TIPSET, Access::Read);
-    access.insert(chain_api::CHAIN_GET_RANDOMNESS_FROM_TICKETS, Access::Read);
-    access.insert(chain_api::CHAIN_GET_RANDOMNESS_FROM_BEACON, Access::Read);
+    access.insert(chain_api::CHAIN_GET_TIPSET_HASH, Access::Read);
+    access.insert(chain_api::CHAIN_VALIDATE_TIPSET_CHECKPOINTS, Access::Read);
+    access.insert(chain_api::CHAIN_GET_NAME, Access::Read);
 
     // Message Pool API
-    access.insert(mpool_api::MPOOL_ESTIMATE_GAS_PRICE, Access::Read);
-    access.insert(mpool_api::MPOOL_GET_NONCE, Access::Read);
     access.insert(mpool_api::MPOOL_PENDING, Access::Read);
     access.insert(mpool_api::MPOOL_PUSH, Access::Write);
     access.insert(mpool_api::MPOOL_PUSH_MESSAGE, Access::Sign);
-    access.insert(mpool_api::MPOOL_SELECT, Access::Read);
 
     // Sync API
     access.insert(sync_api::SYNC_CHECK_BAD, Access::Read);
     access.insert(sync_api::SYNC_MARK_BAD, Access::Admin);
     access.insert(sync_api::SYNC_STATE, Access::Read);
-    access.insert(sync_api::SYNC_SUBMIT_BLOCK, Access::Write);
 
     // Wallet API
     access.insert(wallet_api::WALLET_BALANCE, Access::Write);
@@ -66,43 +61,16 @@ pub static ACCESS_MAP: Lazy<HashMap<&str, Access>> = Lazy::new(|| {
     access.insert(wallet_api::WALLET_NEW, Access::Write);
     access.insert(wallet_api::WALLET_SET_DEFAULT, Access::Write);
     access.insert(wallet_api::WALLET_SIGN, Access::Sign);
-    access.insert(wallet_api::WALLET_SIGN_MESSAGE, Access::Sign);
     access.insert(wallet_api::WALLET_VERIFY, Access::Read);
 
     // State API
-    access.insert(state_api::STATE_MINER_SECTORS, Access::Read);
     access.insert(state_api::STATE_CALL, Access::Read);
-    access.insert(state_api::STATE_MINER_DEADLINES, Access::Read);
-    access.insert(state_api::STATE_SECTOR_PRECOMMIT_INFO, Access::Read);
-    access.insert(state_api::STATE_SECTOR_GET_INFO, Access::Read);
-    access.insert(state_api::STATE_MINER_PROVING_DEADLINE, Access::Read);
-    access.insert(state_api::STATE_MINER_INFO, Access::Read);
-    access.insert(state_api::STATE_MINER_FAULTS, Access::Read);
-    access.insert(state_api::STATE_ALL_MINER_FAULTS, Access::Read);
-    access.insert(state_api::STATE_MINER_RECOVERIES, Access::Read);
-    access.insert(state_api::STATE_MINER_PARTITIONS, Access::Read);
-    access.insert(state_api::STATE_MINER_POWER, Access::Read);
-    access.insert(
-        state_api::STATE_MINER_PRE_COMMIT_DEPOSIT_FOR_POWER,
-        Access::Read,
-    );
-    access.insert(
-        state_api::STATE_MINER_INITIAL_PLEDGE_COLLATERAL,
-        Access::Read,
-    );
     access.insert(state_api::STATE_REPLAY, Access::Read);
-    access.insert(state_api::STATE_GET_ACTOR, Access::Read);
-    access.insert(state_api::STATE_ACCOUNT_KEY, Access::Read);
-    access.insert(state_api::STATE_LOOKUP_ID, Access::Read);
     access.insert(state_api::STATE_MARKET_BALANCE, Access::Read);
     access.insert(state_api::STATE_MARKET_DEALS, Access::Read);
     access.insert(state_api::STATE_GET_RECEIPT, Access::Read);
     access.insert(state_api::STATE_WAIT_MSG, Access::Read);
-    access.insert(state_api::STATE_MINER_SECTOR_ALLOCATED, Access::Read);
     access.insert(state_api::STATE_NETWORK_NAME, Access::Read);
-    access.insert(state_api::MINER_GET_BASE_INFO, Access::Read);
-    access.insert(state_api::STATE_LIST_ACTORS, Access::Read);
-    access.insert(state_api::MINER_CREATE_BLOCK, Access::Write);
     access.insert(state_api::STATE_NETWORK_VERSION, Access::Read);
 
     // Gas API
@@ -113,6 +81,7 @@ pub static ACCESS_MAP: Lazy<HashMap<&str, Access>> = Lazy::new(|| {
 
     // Common API
     access.insert(common_api::VERSION, Access::Read);
+    access.insert(common_api::SHUTDOWN, Access::Admin);
 
     // Net API
     access.insert(net_api::NET_ADDRS_LISTEN, Access::Read);
@@ -123,7 +92,7 @@ pub static ACCESS_MAP: Lazy<HashMap<&str, Access>> = Lazy::new(|| {
     access
 });
 
-/// Checks an access enum against provided JWT claims
+/// Checks an access enumeration against provided JWT claims
 pub fn check_access(access: &Access, claims: &[String]) -> bool {
     match access {
         Access::Admin => claims.contains(&"admin".to_owned()),
@@ -139,10 +108,20 @@ pub const API_INFO_KEY: &str = "FULLNODE_API_INFO";
 
 /// JSON-RPC API definitions
 
-/// Auth API
+/// Authorization API
 pub mod auth_api {
+    use chrono::Duration;
+    use serde::{Deserialize, Serialize};
+    use serde_with::{serde_as, DurationSeconds};
+
     pub const AUTH_NEW: &str = "Filecoin.AuthNew";
-    pub type AuthNewParams = (Vec<String>,);
+    #[serde_as]
+    #[derive(Deserialize, Serialize)]
+    pub struct AuthNewParams {
+        pub perms: Vec<String>,
+        #[serde_as(as = "DurationSeconds<i64>")]
+        pub token_exp: Duration,
+    }
     pub type AuthNewResult = Vec<u8>;
 
     pub const AUTH_VERIFY: &str = "Filecoin.AuthVerify";
@@ -152,8 +131,8 @@ pub mod auth_api {
 
 /// Beacon API
 pub mod beacon_api {
-    use beacon::json::BeaconEntryJson;
-    use clock::ChainEpoch;
+    use forest_beacon::json::BeaconEntryJson;
+    use fvm_shared::clock::ChainEpoch;
 
     pub const BEACON_GET_ENTRY: &str = "Filecoin.BeaconGetEntry";
     pub type BeaconGetEntryParams = (ChainEpoch,);
@@ -162,19 +141,35 @@ pub mod beacon_api {
 
 /// Chain API
 pub mod chain_api {
-    use crate::data_types::BlockMessages;
-    use blocks::{
+    use std::path::PathBuf;
+
+    use forest_blocks::{
         header::json::BlockHeaderJson, tipset_json::TipsetJson, tipset_keys_json::TipsetKeysJson,
         TipsetKeys,
     };
-    use chain::headchange_json::SubscriptionHeadChange;
-    use cid::json::CidJson;
-    use clock::ChainEpoch;
-    use message::unsigned_message::json::UnsignedMessageJson;
+    use forest_json::{cid::CidJson, message::json::MessageJson};
+    use fvm_shared::clock::ChainEpoch;
+    use serde::{Deserialize, Serialize};
+
+    use crate::data_types::BlockMessages;
 
     pub const CHAIN_GET_MESSAGE: &str = "Filecoin.ChainGetMessage";
     pub type ChainGetMessageParams = (CidJson,);
-    pub type ChainGetMessageResult = UnsignedMessageJson;
+    pub type ChainGetMessageResult = MessageJson;
+
+    pub const CHAIN_EXPORT: &str = "Filecoin.ChainExport";
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ChainExportParams {
+        pub epoch: ChainEpoch,
+        pub recent_roots: i64,
+        pub output_path: PathBuf,
+        pub tipset_keys: TipsetKeysJson,
+        pub skip_checksum: bool,
+        pub dry_run: bool,
+    }
+
+    pub type ChainExportResult = PathBuf;
 
     pub const CHAIN_READ_OBJ: &str = "Filecoin.ChainReadObj";
     pub type ChainReadObjParams = (CidJson,);
@@ -200,18 +195,6 @@ pub mod chain_api {
     pub type ChainHeadParams = ();
     pub type ChainHeadResult = TipsetJson;
 
-    pub const CHAIN_HEAD_SUBSCRIPTION: &str = "Filecoin.ChainHeadSubscription";
-    pub type ChainHeadSubscriptionParams = ();
-    pub type ChainHeadSubscriptionResult = i64;
-
-    pub const CHAIN_NOTIFY: &str = "Filecoin.ChainNotify";
-    pub type ChainNotifyParams = ();
-    pub type ChainNotifyResult = SubscriptionHeadChange;
-
-    pub const CHAIN_TIPSET_WEIGHT: &str = "Filecoin.ChainTipSetWeight";
-    pub type ChainTipSetWeightParams = (TipsetKeysJson,);
-    pub type ChainTipSetWeightResult = String;
-
     pub const CHAIN_GET_BLOCK: &str = "Filecoin.ChainGetBlock";
     pub type ChainGetBlockParams = (CidJson,);
     pub type ChainGetBlockResult = BlockHeaderJson;
@@ -220,35 +203,29 @@ pub mod chain_api {
     pub type ChainGetTipSetParams = (TipsetKeysJson,);
     pub type ChainGetTipSetResult = TipsetJson;
 
-    pub const CHAIN_GET_RANDOMNESS_FROM_TICKETS: &str = "Filecoin.ChainGetRandomnessFromTickets";
-    pub type ChainGetRandomnessFromTicketsParams =
-        (TipsetKeysJson, i64, ChainEpoch, Option<String>);
-    pub type ChainGetRandomnessFromTicketsResult = [u8; 32];
+    pub const CHAIN_GET_TIPSET_HASH: &str = "Filecoin.ChainGetTipSetHash";
+    pub type ChainGetTipSetHashParams = (TipsetKeysJson,);
+    pub type ChainGetTipSetHashResult = String;
 
-    pub const CHAIN_GET_RANDOMNESS_FROM_BEACON: &str = "Filecoin.ChainGetRandomnessFromBeacon";
-    pub type ChainGetRandomnessFromBeaconParams = (TipsetKeysJson, i64, ChainEpoch, Option<String>);
-    pub type ChainGetRandomnessFromBeaconResult = [u8; 32];
+    pub const CHAIN_VALIDATE_TIPSET_CHECKPOINTS: &str = "Filecoin.ChainValidateTipSetCheckpoints";
+    pub type ChainValidateTipSetCheckpointsParams = ();
+    pub type ChainValidateTipSetCheckpointsResult = String;
+
+    pub const CHAIN_GET_NAME: &str = "Filecoin.ChainGetName";
+    pub type ChainGetNameParams = ();
+    pub type ChainGetNameResult = String;
 }
 
 /// Message Pool API
 pub mod mpool_api {
-    use crate::data_types::MessageSendSpec;
-    use blocks::{tipset_keys_json::TipsetKeysJson, TipsetKeys};
-    use cid::json::CidJson;
-    use message::{
-        signed_message::json::SignedMessageJson, unsigned_message::json::UnsignedMessageJson,
+    use forest_json::{
+        cid::{vec::CidJsonVec, CidJson},
+        message::json::MessageJson,
+        signed_message::json::SignedMessageJson,
     };
+    use forest_message::SignedMessage;
 
-    pub const MPOOL_ESTIMATE_GAS_PRICE: &str = "Filecoin.MpoolEstimateGasPrice";
-    pub type MpoolEstimateGasPriceParams = (u64, String, u64, TipsetKeys);
-    pub type MpoolEstimateGasPriceResult = String;
-
-    pub const MPOOL_GET_NONCE: &str = "Filecoin.MpoolGetNonce";
-    pub type MpoolGetNonceParams = (String,);
-    pub type MpoolGetNonceResult = u64;
-
-    use cid::json::vec::CidJsonVec;
-    use message::SignedMessage;
+    use crate::data_types::MessageSendSpec;
 
     pub const MPOOL_PENDING: &str = "Filecoin.MpoolPending";
     pub type MpoolPendingParams = (CidJsonVec,);
@@ -259,23 +236,15 @@ pub mod mpool_api {
     pub type MpoolPushResult = CidJson;
 
     pub const MPOOL_PUSH_MESSAGE: &str = "Filecoin.MpoolPushMessage";
-    pub type MpoolPushMessageParams = (UnsignedMessageJson, Option<MessageSendSpec>);
+    pub type MpoolPushMessageParams = (MessageJson, Option<MessageSendSpec>);
     pub type MpoolPushMessageResult = SignedMessageJson;
-
-    pub const MPOOL_SELECT: &str = "Filecoin.MpoolSelect";
-    pub type MpoolSelectParams = (TipsetKeysJson, f64);
-    pub type MpoolSelectResult = Vec<SignedMessageJson>;
-
-    pub const MPOOL_UPDATES: &str = "Filecoin.MpoolUpdates";
-    pub type MpoolUpdatesParams = ();
-    pub type MpoolUpdatesResult = ();
 }
 
 /// Sync API
 pub mod sync_api {
+    use forest_json::cid::CidJson;
+
     use crate::data_types::RPCSyncState;
-    use blocks::gossip_block::json::GossipBlockJson;
-    use cid::json::CidJson;
 
     pub const SYNC_CHECK_BAD: &str = "Filecoin.SyncCheckBad";
     pub type SyncCheckBadParams = (CidJson,);
@@ -288,20 +257,15 @@ pub mod sync_api {
     pub const SYNC_STATE: &str = "Filecoin.SyncState";
     pub type SyncStateParams = ();
     pub type SyncStateResult = RPCSyncState;
-
-    pub const SYNC_SUBMIT_BLOCK: &str = "Filecoin.SyncSubmitBlock";
-    pub type SyncSubmitBlockParams = (GossipBlockJson,);
-    pub type SyncSubmitBlockResult = ();
 }
 
 /// Wallet API
 pub mod wallet_api {
-    use address::json::AddressJson;
-    use crypto::signature::json::{signature_type::SignatureTypeJson, SignatureJson};
-    use message::{
-        signed_message::json::SignedMessageJson, unsigned_message::json::UnsignedMessageJson,
+    use forest_json::{
+        address::json::AddressJson,
+        signature::json::{signature_type::SignatureTypeJson, SignatureJson},
     };
-    use wallet::json::KeyInfoJson;
+    use forest_key_management::json::KeyInfoJson;
 
     pub const WALLET_BALANCE: &str = "Filecoin.WalletBalance";
     pub type WalletBalanceParams = (String,);
@@ -339,82 +303,27 @@ pub mod wallet_api {
     pub type WalletSignParams = (AddressJson, Vec<u8>);
     pub type WalletSignResult = SignatureJson;
 
-    pub const WALLET_SIGN_MESSAGE: &str = "Filecoin.WalletSignMessage";
-    pub type WalletSignMessageParams = (String, UnsignedMessageJson);
-    pub type WalletSignMessageResult = SignedMessageJson;
-
     pub const WALLET_VERIFY: &str = "Filecoin.WalletVerify";
-    pub type WalletVerifyParams = (String, String, SignatureJson);
+    pub type WalletVerifyParams = (AddressJson, Vec<u8>, SignatureJson);
     pub type WalletVerifyResult = bool;
 }
 
 /// State API
 pub mod state_api {
-    use std::collections::HashMap;
+    use ahash::HashMap;
+    use forest_blocks::tipset_keys_json::TipsetKeysJson;
+    use forest_json::{
+        address::json::AddressJson, cid::CidJson, message::json::MessageJson,
+        message_receipt::json::ReceiptJson,
+    };
+    use forest_shim::version::NetworkVersion;
+    use forest_state_manager::{InvocResult, MarketBalance};
 
-    use crate::data_types::{
-        ActorStateJson, BlockTemplate, Deadline, Fault, MarketDeal, MessageLookup,
-        MiningBaseInfoJson, Partition,
-    };
-    use actor::miner::{
-        MinerInfo, MinerPower, SectorOnChainInfo, SectorPreCommitInfo, SectorPreCommitOnChainInfo,
-    };
-    use address::json::AddressJson;
-    use bitfield::json::BitFieldJson;
-    use blocks::{
-        gossip_block::json::GossipBlockJson as BlockMsgJson, tipset_keys_json::TipsetKeysJson,
-    };
-    use cid::json::CidJson;
-    use clock::ChainEpoch;
-    use fil_types::{deadlines::DeadlineInfo, NetworkVersion, SectorNumber};
-    use message::{
-        message_receipt::json::MessageReceiptJson, unsigned_message::json::UnsignedMessageJson,
-    };
-    use state_manager::{InvocResult, MarketBalance};
-
-    pub const STATE_MINER_SECTORS: &str = "Filecoin.StateMinerSectors";
-    pub type StateMinerSectorsParams = (AddressJson, BitFieldJson, TipsetKeysJson);
-    pub type StateMinerSectorsResult = Vec<SectorOnChainInfo>;
+    use crate::data_types::{MarketDeal, MessageLookup};
 
     pub const STATE_CALL: &str = "Filecoin.StateCall";
-    pub type StateCallParams = (UnsignedMessageJson, TipsetKeysJson);
+    pub type StateCallParams = (MessageJson, TipsetKeysJson);
     pub type StateCallResult = InvocResult;
-
-    pub const STATE_MINER_DEADLINES: &str = "Filecoin.StateMinerDeadlines";
-    pub type StateMinerDeadlinesParams = (AddressJson, TipsetKeysJson);
-    pub type StateMinerDeadlinesResult = Vec<Deadline>;
-
-    pub const STATE_SECTOR_PRECOMMIT_INFO: &str = "Filecoin.StateSectorPrecommitInfo";
-    pub type StateSectorPrecommitInfoParams = (AddressJson, SectorNumber, TipsetKeysJson);
-    pub type StateSectorPrecommitInfoResult = SectorPreCommitOnChainInfo;
-
-    pub const STATE_MINER_INFO: &str = "Filecoin.StateMinerInfo";
-    pub type StateMinerInfoParams = (AddressJson, TipsetKeysJson);
-    pub type StateMinerInfoResult = MinerInfo;
-
-    pub const STATE_SECTOR_GET_INFO: &str = "Filecoin.StateSectorGetInfo";
-    pub type StateSectorGetInfoParams = (AddressJson, SectorNumber, TipsetKeysJson);
-    pub type StateSectorGetInfoResult = Option<SectorOnChainInfo>;
-
-    pub const STATE_MINER_PROVING_DEADLINE: &str = "Filecoin.StateMinerProvingDeadline";
-    pub type StateMinerProvingDeadlineParams = (AddressJson, TipsetKeysJson);
-    pub type StateMinerProvingDeadlineResult = DeadlineInfo;
-
-    pub const STATE_MINER_FAULTS: &str = "Filecoin.StateMinerFaults";
-    pub type StateMinerFaultsParams = (AddressJson, TipsetKeysJson);
-    pub type StateMinerFaultsResult = BitFieldJson;
-
-    pub const STATE_ALL_MINER_FAULTS: &str = "Filecoin.StateAllMinerFaults";
-    pub type StateAllMinerFaultsParams = (ChainEpoch, TipsetKeysJson);
-    pub type StateAllMinerFaultsResult = Vec<Fault>;
-
-    pub const STATE_MINER_RECOVERIES: &str = "Filecoin.StateMinerRecoveries";
-    pub type StateMinerRecoveriesParams = (AddressJson, TipsetKeysJson);
-    pub type StateMinerRecoveriesResult = BitFieldJson;
-
-    pub const STATE_MINER_PARTITIONS: &str = "Filecoin.StateMinerPartitions";
-    pub type StateMinerPartitionsParams = (AddressJson, u64, TipsetKeysJson);
-    pub type StateMinerPartitionsResult = Vec<Partition>;
 
     pub const STATE_REPLAY: &str = "Filecoin.StateReplay";
     pub type StateReplayParams = (CidJson, TipsetKeysJson);
@@ -428,22 +337,6 @@ pub mod state_api {
     pub type StateNetworkVersionParams = (TipsetKeysJson,);
     pub type StateNetworkVersionResult = NetworkVersion;
 
-    pub const STATE_GET_ACTOR: &str = "Filecoin.StateGetActor";
-    pub type StateGetActorParams = (AddressJson, TipsetKeysJson);
-    pub type StateGetActorResult = Option<ActorStateJson>;
-
-    pub const STATE_LIST_ACTORS: &str = "Filecoin.StateListActors";
-    pub type StateListActorsParams = (TipsetKeysJson,);
-    pub type StateListActorsResult = Vec<AddressJson>;
-
-    pub const STATE_ACCOUNT_KEY: &str = "Filecoin.StateAccountKey";
-    pub type StateAccountKeyParams = (AddressJson, TipsetKeysJson);
-    pub type StateAccountKeyResult = Option<AddressJson>;
-
-    pub const STATE_LOOKUP_ID: &str = "Filecoin.StateLookupId";
-    pub type StateLookupIdParams = (AddressJson, TipsetKeysJson);
-    pub type StateLookupIdResult = Option<AddressJson>;
-
     pub const STATE_MARKET_BALANCE: &str = "Filecoin.StateMarketBalance";
     pub type StateMarketBalanceParams = (AddressJson, TipsetKeysJson);
     pub type StateMarketBalanceResult = MarketBalance;
@@ -454,50 +347,22 @@ pub mod state_api {
 
     pub const STATE_GET_RECEIPT: &str = "Filecoin.StateGetReceipt";
     pub type StateGetReceiptParams = (CidJson, TipsetKeysJson);
-    pub type StateGetReceiptResult = MessageReceiptJson;
+    pub type StateGetReceiptResult = ReceiptJson;
 
     pub const STATE_WAIT_MSG: &str = "Filecoin.StateWaitMsg";
     pub type StateWaitMsgParams = (CidJson, i64);
     pub type StateWaitMsgResult = MessageLookup;
-
-    pub const MINER_CREATE_BLOCK: &str = "Filecoin.MinerCreateBlock";
-    pub type MinerCreateBlockParams = (BlockTemplate,);
-    pub type MinerCreateBlockResult = BlockMsgJson;
-
-    pub const STATE_MINER_SECTOR_ALLOCATED: &str = "Filecoin.StateMinerSectorAllocated";
-    pub type StateMinerSectorAllocatedParams = (AddressJson, u64, TipsetKeysJson);
-    pub type StateMinerSectorAllocatedResult = bool;
-
-    pub const STATE_MINER_POWER: &str = "Filecoin.StateMinerPower";
-    pub type StateMinerPowerParams = (Option<AddressJson>, TipsetKeysJson);
-    pub type StateMinerPowerResult = MinerPower;
-
-    pub const STATE_MINER_PRE_COMMIT_DEPOSIT_FOR_POWER: &str =
-        "Filecoin.StateMinerPreCommitDepositForPower";
-    pub type StateMinerPreCommitDepositForPowerParams =
-        (AddressJson, SectorPreCommitInfo, TipsetKeysJson);
-    pub type StateMinerPreCommitDepositForPowerResult = String;
-
-    pub const STATE_MINER_INITIAL_PLEDGE_COLLATERAL: &str =
-        "Filecoin.StateMinerInitialPledgeCollateral";
-    pub type StateMinerInitialPledgeCollateralParams =
-        (AddressJson, SectorPreCommitInfo, TipsetKeysJson);
-    pub type StateMinerInitialPledgeCollateralResult = String;
-
-    pub const MINER_GET_BASE_INFO: &str = "Filecoin.MinerGetBaseInfo";
-    pub type MinerGetBaseInfoParams = (AddressJson, ChainEpoch, TipsetKeysJson);
-    pub type MinerGetBaseInfoResult = Option<MiningBaseInfoJson>;
 }
 
 /// Gas API
 pub mod gas_api {
+    use forest_blocks::tipset_keys_json::TipsetKeysJson;
+    use forest_json::{address::json::AddressJson, message::json::MessageJson};
+
     use crate::data_types::MessageSendSpec;
-    use address::json::AddressJson;
-    use blocks::tipset_keys_json::TipsetKeysJson;
-    use message::unsigned_message::json::UnsignedMessageJson;
 
     pub const GAS_ESTIMATE_FEE_CAP: &str = "Filecoin.GasEstimateFeeCap";
-    pub type GasEstimateFeeCapParams = (UnsignedMessageJson, i64, TipsetKeysJson);
+    pub type GasEstimateFeeCapParams = (MessageJson, i64, TipsetKeysJson);
     pub type GasEstimateFeeCapResult = String;
 
     pub const GAS_ESTIMATE_GAS_PREMIUM: &str = "Filecoin.GasEstimateGasPremium";
@@ -505,22 +370,25 @@ pub mod gas_api {
     pub type GasEstimateGasPremiumResult = String;
 
     pub const GAS_ESTIMATE_GAS_LIMIT: &str = "Filecoin.GasEstimateGasLimit";
-    pub type GasEstimateGasLimitParams = (UnsignedMessageJson, TipsetKeysJson);
+    pub type GasEstimateGasLimitParams = (MessageJson, TipsetKeysJson);
     pub type GasEstimateGasLimitResult = i64;
 
     pub const GAS_ESTIMATE_MESSAGE_GAS: &str = "Filecoin.GasEstimateMessageGas";
-    pub type GasEstimateMessageGasParams =
-        (UnsignedMessageJson, Option<MessageSendSpec>, TipsetKeysJson);
-    pub type GasEstimateMessageGasResult = UnsignedMessageJson;
+    pub type GasEstimateMessageGasParams = (MessageJson, Option<MessageSendSpec>, TipsetKeysJson);
+    pub type GasEstimateMessageGasResult = MessageJson;
 }
 
 /// Common API
 pub mod common_api {
-    use fil_types::build_version::APIVersion;
+    use super::data_types::APIVersion;
 
     pub const VERSION: &str = "Filecoin.Version";
     pub type VersionParams = ();
     pub type VersionResult = APIVersion;
+
+    pub const SHUTDOWN: &str = "Filecoin.Shutdown";
+    pub type ShutdownParams = ();
+    pub type ShutdownResult = ();
 }
 
 /// Net API

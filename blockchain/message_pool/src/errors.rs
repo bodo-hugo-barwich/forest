@@ -1,12 +1,12 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use chain::Error as ChainError;
-use encoding::Error as EncodeError;
+use forest_chain::Error as ChainError;
+use fvm_ipld_encoding::Error as EncodeError;
 use thiserror::Error;
 
-/// MessagePool error.
-#[derive(Debug, PartialEq, Error)]
+/// `MessagePool` error.
+#[derive(Debug, PartialEq, Eq, Error)]
 pub enum Error {
     /// Error indicating message that's too large
     #[error("Message is too big")]
@@ -44,5 +44,11 @@ impl From<ChainError> for Error {
 impl From<EncodeError> for Error {
     fn from(ee: EncodeError) -> Self {
         Error::Other(ee.to_string())
+    }
+}
+
+impl From<anyhow::Error> for Error {
+    fn from(e: anyhow::Error) -> Self {
+        Error::Other(e.to_string())
     }
 }

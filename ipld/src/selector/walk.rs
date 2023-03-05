@@ -1,15 +1,19 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use super::super::{Error, Ipld, Path, PathSegment};
-use super::Selector;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use cid::Cid;
 
+use super::{
+    super::{lookup_segment, Error, Ipld, Path},
+    Selector,
+};
+
 impl Selector {
-    /// Walks all nodes visited (not just matched nodes) and executes callback with progress and
-    /// Ipld node. An optional link loader/resolver is passed in to be able to traverse links.
+    /// Walks all nodes visited (not just matched nodes) and executes callback
+    /// with progress and IPLD node. An optional link loader/resolver is
+    /// passed in to be able to traverse links.
     pub async fn walk_all<L, F>(
         self,
         ipld: &Ipld,
@@ -29,8 +33,9 @@ impl Selector {
         .await
     }
 
-    /// Walks a graph of Ipld nodes, executing the callback only on the nodes "matched".
-    /// If a resolver is passed in, links will be able to be traversed.
+    /// Walks a graph of IPLD nodes, executing the callback only on the nodes
+    /// "matched". If a resolver is passed in, links will be able to be
+    /// traversed.
     pub async fn walk_matching<L, F>(
         self,
         ipld: &Ipld,
@@ -52,29 +57,29 @@ impl Selector {
 }
 
 /// Provides reason for callback in traversal for `walk_all`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisitReason {
-    /// Ipld node visited was a specific match.
+    /// IPLD node visited was a specific match.
     SelectionMatch,
-    /// Ipld node was visited while searching for matches.
+    /// IPLD node was visited while searching for matches.
     SelectionCandidate,
 }
 
 #[async_trait]
 pub trait LinkResolver {
-    /// Resolves a Cid link into it's respective Ipld node, if it exists.
+    /// Resolves a Cid link into it's respective IPLD node, if it exists.
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String>;
 }
 
 #[async_trait]
 impl LinkResolver for () {
-    #[allow(unused_variables, clippy::trivially_copy_pass_by_ref)]
-    async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
+    async fn load_link(&mut self, _link: &Cid) -> Result<Option<Ipld>, String> {
         Err("load_link not implemented on the LinkResolver for default implementation".into())
     }
 }
 
-/// Contains progress of traversal and last block information from link traversals.
+/// Contains progress of traversal and last block information from link
+/// traversals.
 #[derive(Debug, Default)]
 pub struct Progress<L = ()> {
     resolver: Option<L>,
@@ -82,8 +87,9 @@ pub struct Progress<L = ()> {
     last_block: Option<LastBlockInfo>,
 }
 
-/// Contains information about the last block that was traversed in walking of the ipld graph.
-#[derive(Debug, PartialEq, Clone)]
+/// Contains information about the last block that was traversed in walking of
+/// the IPLD graph.
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct LastBlockInfo {
     pub path: Path,
     pub link: Cid,
@@ -150,11 +156,11 @@ where
         match selector.interests() {
             Some(interests) => {
                 for ps in interests {
-                    let v = match ipld.lookup_segment(&ps) {
+                    let v = match lookup_segment(ipld, &ps) {
                         Some(ipld) => ipld,
                         None => continue,
                     };
-                    self.traverse_node(ipld, selector.clone(), callback, ps, v)
+                    self.traverse_node(ipld, selector.clone(), callback, &ps, v)
                         .await?;
                 }
                 Ok(())
@@ -163,15 +169,14 @@ where
                 match ipld {
                     Ipld::Map(m) => {
                         for (k, v) in m.iter() {
-                            let ps = PathSegment::from(k.as_ref());
-                            self.traverse_node(ipld, selector.clone(), callback, ps, v)
+                            self.traverse_node(ipld, selector.clone(), callback, k, v)
                                 .await?;
                         }
                     }
                     Ipld::List(list) => {
                         for (i, v) in list.iter().enumerate() {
-                            let ps = PathSegment::from(i);
-                            self.traverse_node(ipld, selector.clone(), callback, ps, v)
+                            let ps = i.to_string();
+                            self.traverse_node(ipld, selector.clone(), callback, &ps, v)
                                 .await?;
                         }
                     }
@@ -183,23 +188,24 @@ where
         }
     }
 
-    /// Utility function just to reduce duplicate logic. Can't do with a closure because
-    /// async closures are currently unstable: https://github.com/rust-lang/rust/issues/62290
+    /// Utility function just to reduce duplicate logic. Can't do with a closure
+    /// because async closures are currently unstable: https://github.com/rust-lang/rust/issues/62290
     async fn traverse_node<F>(
         &mut self,
         ipld: &Ipld,
         selector: Selector,
         callback: &F,
-        ps: PathSegment,
+        ps: &str,
         v: &Ipld,
     ) -> Result<(), Error>
     where
         F: Fn(&Progress<L>, &Ipld, VisitReason) -> Result<(), String> + Sync,
     {
-        if let Some(next_selector) = selector.explore(ipld, &ps) {
-            self.path.push(ps);
+        if let Some(next_selector) = selector.explore(ipld, ps) {
+            let prev = self.path.clone();
+            self.path.join(ps);
             self.walk_all(v, next_selector, callback).await?;
-            self.path.pop();
+            self.path = prev;
         }
         Ok(())
     }
@@ -207,16 +213,68 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::ipld;
+    use indexmap::IndexMap;
+    use libipld_macro::ipld;
+    use multihash::{Code::Blake2b256, MultihashDigest};
 
-    #[async_std::test]
+    use super::*;
+
+    #[tokio::test]
     async fn basic_walk() {
         let selector = Selector::Matcher;
 
         selector
             .walk_matching::<(), _>(&ipld!("Some IPLD data!"), None, |_progress, ipld| {
                 assert_eq!(ipld, &ipld!("Some IPLD data!"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn explore_fields() {
+        let selector = Selector::ExploreFields {
+            fields: IndexMap::from([("name".to_owned(), Selector::Matcher)]),
+        };
+        let details = Cid::new_v1(fvm_ipld_encoding::DAG_CBOR, Blake2b256.digest(&[1, 2, 3]));
+        let src = ipld!({"details": Ipld::Link(details), "name": "Test"});
+        selector
+            .walk_matching::<(), _>(&src, None, |_progress, ipld| {
+                assert_eq!(&ipld!("Test"), ipld);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn explore_index() {
+        let selector = Selector::ExploreIndex {
+            index: 2,
+            next: Box::new(Selector::Matcher),
+        };
+        let src = ipld!(["A", "B", "C", "D", "E"]);
+        selector
+            .walk_matching::<(), _>(&src, None, |_progress, ipld| {
+                assert_eq!(&ipld!("C"), ipld);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn explore_range() {
+        let selector = Selector::ExploreRange {
+            start: 2,
+            end: 4,
+            next: Box::new(Selector::Matcher),
+        };
+        let src = ipld!(["A", "B", "C", "D", "E"]);
+        selector
+            .walk_matching::<(), _>(&src, None, |_progress, ipld| {
+                assert!(&ipld!("C") == ipld || &ipld!("D") == ipld || &ipld!("E") == ipld);
                 Ok(())
             })
             .await

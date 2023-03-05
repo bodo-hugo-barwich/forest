@@ -1,45 +1,50 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use super::{ElectionProof, Error, Ticket, TipsetKeys};
-use address::Address;
-use beacon::{self, Beacon, BeaconEntry, BeaconSchedule};
-use cid::{Cid, Code::Blake2b256};
-use clock::ChainEpoch;
-use crypto::Signature;
-use derive_builder::Builder;
-use encoding::blake2b_256;
-use encoding::{Cbor, Error as EncodingError};
-use fil_types::{PoStProof, BLOCKS_PER_EPOCH};
-use num_bigint::{
-    bigint_ser::{BigIntDe, BigIntSer},
-    BigInt,
+use std::fmt;
+
+use cid::{
+    multihash::{Code::Blake2b256, MultihashDigest},
+    Cid,
 };
+use derive_builder::Builder;
+use forest_beacon::{self, Beacon, BeaconEntry, BeaconSchedule};
+use forest_encoding::blake2b_256;
+use forest_shim::{
+    address::Address,
+    bigint::{BigIntDe, BigIntSer},
+    crypto::Signature,
+    econ::TokenAmount,
+    sector::PoStProof,
+    version::NetworkVersion,
+};
+use fvm_ipld_encoding::{Cbor, Error as EncodingError, DAG_CBOR};
+use fvm_shared::clock::ChainEpoch;
+use num::BigInt;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha2::Digest;
-use std::fmt;
-use vm::TokenAmount;
 
-#[cfg(feature = "json")]
+use super::{ElectionProof, Error, Ticket, TipsetKeys};
+
 pub mod json;
-
-const SHA_256_BITS: usize = 256;
 
 /// Header of a block
 ///
 /// Usage:
 /// ```
 /// use forest_blocks::{BlockHeader, TipsetKeys, Ticket};
-/// use address::Address;
-/// use cid::{Cid, Code::Identity};
-/// use num_bigint::BigInt;
-/// use crypto::Signature;
+/// use fvm_shared::address::Address;
+/// use cid::Cid;
+/// use cid::multihash::Code::Identity;
+/// use num::BigInt;
+/// use forest_shim::crypto::Signature;
+/// use fvm_ipld_encoding::DAG_CBOR;
+/// use cid::multihash::MultihashDigest;
 ///
 /// BlockHeader::builder()
-///     .messages(cid::new_from_cbor(&[], Identity)) // required
-///     .message_receipts(cid::new_from_cbor(&[], Identity)) // required
-///     .state_root(cid::new_from_cbor(&[], Identity)) // required
+///     .messages(Cid::new_v1(DAG_CBOR, Identity.digest(&[]))) // required
+///     .message_receipts(Cid::new_v1(DAG_CBOR, Identity.digest(&[]))) // required
+///     .state_root(Cid::new_v1(DAG_CBOR, Identity.digest(&[]))) // required
 ///     .miner_address(Address::new_id(0)) // optional
 ///     .beacon_entries(Vec::new()) // optional
 ///     .winning_post_proof(Vec::new()) // optional
@@ -65,38 +70,41 @@ pub struct BlockHeader {
     #[builder(default)]
     parents: TipsetKeys,
 
-    /// weight is the aggregate chain weight of the parent set
+    /// `weight` is the aggregate chain weight of the parent set
     #[builder(default)]
     weight: BigInt,
 
-    /// epoch is the period in which a new block is generated.
+    /// `epoch` is the period in which a new block is generated.
     /// There may be multiple rounds in an epoch.
     #[builder(default)]
     epoch: ChainEpoch,
 
-    /// BeaconEntries contain the verifiable oracle randomness used to elect
+    /// `beacon_entries` contain the verifiable oracle randomness used to elect
     /// this block's author leader
     #[builder(default)]
     beacon_entries: Vec<BeaconEntry>,
 
-    /// PoStProofs are the winning post proofs
+    /// `PoStProofs` are the winning post proofs
     #[builder(default)]
     winning_post_proof: Vec<PoStProof>,
 
     // MINER INFO
-    /// miner_address is the address of the miner actor that mined this block
+    /// `miner_address` is the address of the miner actor that mined this block
     miner_address: Address,
 
     // STATE
-    /// messages contains the Cid to the merkle links for bls_messages and secp_messages
+    /// `messages` contains the `cid` to the Merkle links for `bls_messages` and
+    /// `secp_messages`
     #[builder(default)]
     messages: Cid,
 
-    /// message_receipts is the Cid of the root of an array of MessageReceipts
+    /// `message_receipts` is the `cid` of the root of an array of
+    /// `MessageReceipts`
     #[builder(default)]
     message_receipts: Cid,
 
-    /// state_root is a cid pointer to the parent state root after calculating parent tipset.
+    /// `state_root` is a `cid` pointer to the parent state root after
+    /// calculating parent tipset.
     #[builder(default)]
     state_root: Cid,
 
@@ -110,7 +118,8 @@ pub struct BlockHeader {
     election_proof: Option<ElectionProof>,
 
     // CONSENSUS
-    /// timestamp, in seconds since the Unix epoch, at which this block was created
+    /// timestamp, in seconds since the Unix epoch, at which this block was
+    /// created
     #[builder(default)]
     timestamp: u64,
     /// the ticket submitted with this block
@@ -124,11 +133,12 @@ pub struct BlockHeader {
     #[builder(default)]
     parent_base_fee: TokenAmount,
     // CACHE
-    /// stores the cid for the block after the first call to `cid()`
+    /// stores the `cid` for the block after the first call to `cid()`
     #[builder(default, setter(skip))]
     cached_cid: OnceCell<Cid>,
 
-    /// stores the hashed bytes of the block after the first call to `cached_bytes()`
+    /// stores the hashed bytes of the block after the first call to
+    /// `cached_bytes()`
     #[builder(default, setter(skip))]
     cached_bytes: OnceCell<Vec<u8>>,
 
@@ -140,6 +150,18 @@ pub struct BlockHeader {
 impl PartialEq for BlockHeader {
     fn eq(&self, other: &Self) -> bool {
         self.cid().eq(other.cid())
+    }
+}
+
+impl quickcheck::Arbitrary for BlockHeader {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        // XXX: More fields can be randomly generated.
+        let block_header = BlockHeader::builder()
+            .miner_address(Address::new_id(0))
+            .epoch(ChainEpoch::arbitrary(g))
+            .build()
+            .unwrap();
+        block_header
     }
 }
 
@@ -173,7 +195,7 @@ impl Serialize for BlockHeader {
             &self.timestamp,
             &self.signature,
             &self.fork_signal,
-            BigIntSer(&self.parent_base_fee),
+            &self.parent_base_fee,
         )
             .serialize(serializer)
     }
@@ -200,7 +222,7 @@ impl<'de> Deserialize<'de> for BlockHeader {
             timestamp,
             signature,
             fork_signal,
-            BigIntDe(parent_base_fee),
+            parent_base_fee,
         ) = Deserialize::deserialize(deserializer)?;
 
         let header = BlockHeader {
@@ -230,76 +252,76 @@ impl<'de> Deserialize<'de> for BlockHeader {
 }
 
 impl BlockHeader {
-    /// Generates a BlockHeader builder as a constructor
+    /// Generates a `BlockHeader` builder as a constructor
     pub fn builder() -> BlockHeaderBuilder {
         BlockHeaderBuilder::default()
     }
-    /// Getter for BlockHeader parents
+    /// Get `BlockHeader` parents
     pub fn parents(&self) -> &TipsetKeys {
         &self.parents
     }
-    /// Getter for BlockHeader weight
+    /// Get `BlockHeader` weight
     pub fn weight(&self) -> &BigInt {
         &self.weight
     }
-    /// Getter for BlockHeader epoch
+    /// Get `BlockHeader` epoch
     pub fn epoch(&self) -> ChainEpoch {
         self.epoch
     }
-    /// Getter for Drand BeaconEntry
+    /// Get `Drand` `BeaconEntry`
     pub fn beacon_entries(&self) -> &[BeaconEntry] {
         &self.beacon_entries
     }
-    /// Getter for winning PoSt proof
+    /// Get winning `PoSt` proof
     pub fn winning_post_proof(&self) -> &[PoStProof] {
         &self.winning_post_proof
     }
-    /// Getter for BlockHeader miner_address
+    /// Get `BlockHeader.miner_address`
     pub fn miner_address(&self) -> &Address {
         &self.miner_address
     }
-    /// Getter for BlockHeader messages
+    /// Get `BlockHeader.messages`
     pub fn messages(&self) -> &Cid {
         &self.messages
     }
-    /// Getter for BlockHeader message_receipts
+    /// Get `BlockHeader.message_receipts`
     pub fn message_receipts(&self) -> &Cid {
         &self.message_receipts
     }
-    /// Getter for BlockHeader state_root
+    /// Get `BlockHeader.state_root`
     pub fn state_root(&self) -> &Cid {
         &self.state_root
     }
-    /// Getter for BlockHeader timestamp
+    /// Get `BlockHeader.timestamp`
     pub fn timestamp(&self) -> u64 {
         self.timestamp
     }
-    /// Getter for BlockHeader ticket
+    /// Get `BlockHeader.ticket`
     pub fn ticket(&self) -> &Option<Ticket> {
         &self.ticket
     }
-    /// Getter for BlockHeader bls_aggregate
+    /// Get `BlockHeader.bls_aggregate`
     pub fn bls_aggregate(&self) -> &Option<Signature> {
         &self.bls_aggregate
     }
-    /// Getter for BlockHeader cid
+    /// Get `BlockHeader.cid`
     pub fn cid(&self) -> &Cid {
         self.cached_cid
-            .get_or_init(|| cid::new_from_cbor(self.cached_bytes(), Blake2b256))
+            .get_or_init(|| Cid::new_v1(DAG_CBOR, Blake2b256.digest(self.cached_bytes())))
     }
-    /// Getter for BlockHeader parent_base_fee
-    pub fn parent_base_fee(&self) -> &BigInt {
+    /// Get `BlockHeader.parent_base_fee`
+    pub fn parent_base_fee(&self) -> &TokenAmount {
         &self.parent_base_fee
     }
-    /// Getter for BlockHeader fork_signal
+    /// Get `BlockHeader.fork_signal`
     pub fn fork_signal(&self) -> u64 {
         self.fork_signal
     }
-    /// Getter for BlockHeader epost_verify
+    /// Get `BlockHeader.election_proof`
     pub fn election_proof(&self) -> &Option<ElectionProof> {
         &self.election_proof
     }
-    /// Getter for BlockHeader signature
+    /// Get `BlockHeader.signature`
     pub fn signature(&self) -> &Option<Signature> {
         &self.signature
     }
@@ -310,8 +332,9 @@ impl BlockHeader {
     }
     /// Updates cache and returns mutable reference of header back
     fn cached_bytes(&self) -> &Vec<u8> {
-        self.cached_bytes
-            .get_or_init(|| encoding::to_vec(self).expect("header serialization cannot fail"))
+        self.cached_bytes.get_or_init(|| {
+            fvm_ipld_encoding::to_vec(self).expect("header serialization cannot fail")
+        })
     }
     /// Check to ensure block signature is valid
     pub fn check_block_signature(&self, addr: &Address) -> Result<(), Error> {
@@ -326,42 +349,20 @@ impl BlockHeader {
             .ok_or_else(|| Error::InvalidSignature("Signature is nil in header".to_owned()))?;
 
         signature
-            .verify(&self.to_signing_bytes(), addr)
-            .map_err(|e| Error::InvalidSignature(format!("Block signature invalid: {}", e)))?;
+            .verify(&self.to_signing_bytes(), &addr.into())
+            .map_err(|e| Error::InvalidSignature(format!("Block signature invalid: {e}")))?;
 
         // Set validated cache to true
         let _ = self.is_validated.set(true);
 
         Ok(())
     }
-    /// Returns true if (h(vrfout) * totalPower) < (e * sectorSize * 2^256)
-    pub fn is_ticket_winner(ticket: &Ticket, mpow: BigInt, net_pow: BigInt) -> bool {
-        /*
-        Need to check that
-        (h(vrfout) + 1) / (max(h) + 1) <= e * myPower / totalPower
-        max(h) == 2^256-1
-        which in terms of integer math means:
-        (h(vrfout) + 1) * totalPower <= e * myPower * 2^256
-        in 2^256 space, it is equivalent to:
-        h(vrfout) * totalPower < e * myPower * 2^256
-        */
 
-        let h = sha2::Sha256::digest(ticket.vrfproof.as_bytes());
-        let mut lhs = BigInt::from_signed_bytes_be(&h);
-        lhs *= net_pow;
-
-        // rhs = sectorSize * 2^256
-        // rhs = sectorSize << 256
-        let mut rhs = mpow << SHA_256_BITS;
-        rhs *= BigInt::from(BLOCKS_PER_EPOCH);
-
-        // h(vrfout) * totalPower < e * sectorSize * 2^256
-        lhs < rhs
-    }
-
-    /// Validates if the current header's Beacon entries are valid to ensure randomness was generated correctly
-    pub async fn validate_block_drand<B: Beacon>(
+    /// Validates if the current header's Beacon entries are valid to ensure
+    /// randomness was generated correctly
+    pub fn validate_block_drand<B: Beacon>(
         &self,
+        network_version: NetworkVersion,
         b_schedule: &BeaconSchedule<B>,
         parent_epoch: ChainEpoch,
         prev_entry: &BeaconEntry,
@@ -384,13 +385,12 @@ impl BlockHeader {
 
             curr_beacon
                 .verify_entry(&self.beacon_entries[1], &self.beacon_entries[0])
-                .await
                 .map_err(|e| Error::Validation(e.to_string()))?;
 
             return Ok(());
         }
 
-        let max_round = curr_beacon.max_beacon_round_for_epoch(self.epoch);
+        let max_round = curr_beacon.max_beacon_round_for_epoch(network_version, self.epoch);
         if max_round == prev_entry.round() {
             if !self.beacon_entries.is_empty() {
                 return Err(Error::Validation(format!(
@@ -421,12 +421,10 @@ impl BlockHeader {
         for curr in &self.beacon_entries {
             if !curr_beacon
                 .verify_entry(curr, prev)
-                .await
                 .map_err(|e| Error::Validation(e.to_string()))?
             {
                 return Err(Error::Validation(format!(
-                    "beacon entry was invalid: curr:{:?}, prev: {:?}",
-                    curr, prev
+                    "beacon entry was invalid: curr:{curr:?}, prev: {prev:?}"
                 )));
             }
             prev = curr;
@@ -434,17 +432,20 @@ impl BlockHeader {
         Ok(())
     }
 
-    /// Serializes the header to bytes for signing purposes i.e. without the signature field
+    /// Serializes the header to bytes for signing purposes i.e. without the
+    /// signature field
     pub fn to_signing_bytes(&self) -> Vec<u8> {
         let mut blk = self.clone();
         blk.signature = None;
 
-        // This isn't required now, but future proofs for if the encoding ever uses a cache.
+        // This isn't required now, but future proofs for if the encoding ever uses a
+        // cache.
         blk.cached_bytes = Default::default();
         blk.cached_cid = Default::default();
 
-        // * Intentionally not using cache here, to avoid using cached bytes with signature encoded.
-        encoding::to_vec(&blk).expect("block serialization cannot fail")
+        // * Intentionally not using cache here, to avoid using cached bytes with
+        //   signature encoded.
+        fvm_ipld_encoding::to_vec(&blk).expect("block serialization cannot fail")
     }
 }
 
@@ -457,13 +458,13 @@ impl fmt::Display for BlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{errors::Error, BlockHeader};
-    use address::Address;
-    use beacon::{BeaconEntry, BeaconPoint, BeaconSchedule, MockBeacon};
-    use encoding::Cbor;
+    use std::{sync::Arc, time::Duration};
 
-    use std::sync::Arc;
-    use std::time::Duration;
+    use forest_beacon::{BeaconEntry, BeaconPoint, BeaconSchedule, MockBeacon};
+    use forest_shim::{address::Address, version::NetworkVersion};
+    use fvm_ipld_encoding::Cbor;
+
+    use crate::{errors::Error, BlockHeader};
 
     #[test]
     fn symmetric_header_encoding() {
@@ -472,9 +473,9 @@ mod tests {
         let header = BlockHeader::unmarshal_cbor(&bz).unwrap();
         assert_eq!(header.marshal_cbor().unwrap(), bz);
 
-        // Verify the signature of this block header using the resolved address used to sign.
-        // This is a valid signature, but if the block header vector changes, the address should
-        // need to as well.
+        // Verify the signature of this block header using the resolved address used to
+        // sign. This is a valid signature, but if the block header vector
+        // changes, the address should need to as well.
         header
             .check_block_signature(
                 &"f3vfs6f7tagrcpnwv65wq3leznbajqyg77bmijrpvoyjv3zjyi3urq25vigfbs3ob6ug5xdihajumtgsxnz2pa"
@@ -482,6 +483,7 @@ mod tests {
                 .unwrap())
             .unwrap();
     }
+
     #[test]
     fn beacon_entry_exists() {
         // Setup
@@ -497,11 +499,12 @@ mod tests {
         let chain_epoch = 0;
         let beacon_entry = BeaconEntry::new(1, vec![]);
         // Validate_block_drand
-        if let Err(e) = async_std::task::block_on(block_header.validate_block_drand(
+        if let Err(e) = block_header.validate_block_drand(
+            NetworkVersion::V16,
             &beacon_schedule,
             chain_epoch,
             &beacon_entry,
-        )) {
+        ) {
             // Assert error is for not including a beacon entry in the block
             match e {
                 Error::Validation(why) => {

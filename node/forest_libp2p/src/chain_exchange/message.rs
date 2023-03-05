@@ -1,27 +1,29 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use forest_blocks::{Block, BlockHeader, FullTipset, Tipset, BLOCK_MESSAGE_LIMIT};
-use forest_cid::Cid;
-use forest_encoding::tuple::*;
-use forest_message::{SignedMessage, UnsignedMessage};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::convert::TryFrom;
-use std::sync::Arc;
+use std::{convert::TryFrom, sync::Arc};
 
-/// ChainExchange Filecoin header set bit.
+use cid::Cid;
+use forest_blocks::{Block, BlockHeader, FullTipset, Tipset, BLOCK_MESSAGE_LIMIT};
+use forest_encoding::tuple::*;
+use forest_message::SignedMessage;
+use forest_shim::message::Message;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// `ChainExchange` Filecoin header set bit.
 pub const HEADERS: u64 = 0b01;
-/// ChainExchange Filecoin messages set bit.
+/// `ChainExchange` Filecoin messages set bit.
 pub const MESSAGES: u64 = 0b10;
 
-/// The payload that gets sent to another node to request for blocks and messages.
-#[derive(Clone, Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
+/// The payload that gets sent to another node to request for blocks and
+/// messages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
 pub struct ChainExchangeRequest {
     /// The tipset [Cid] to start the request from.
     pub start: Vec<Cid>,
     /// The amount of epochs to request.
     pub request_len: u64,
-    /// 1 = Block only, 2 = Messages only, 3 = Blocks and Messages.
+    /// 1 for Block only, 2 for Messages only, 3 for Blocks and Messages.
     pub options: u64,
 }
 
@@ -31,14 +33,15 @@ impl ChainExchangeRequest {
         self.options & HEADERS > 0
     }
 
-    /// If a request has the [MESSAGES] bit set and requests messages of a block.
+    /// If a request has the [MESSAGES] bit set and requests messages of a
+    /// block.
     pub fn include_messages(&self) -> bool {
         self.options & MESSAGES > 0
     }
 }
 
-/// Status codes of a chain_exchange response.
-#[derive(Clone, Debug, PartialEq)]
+/// Status codes of a `chain_exchange` response.
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum ChainExchangeResponseStatus {
     /// All is well.
     Success,
@@ -49,12 +52,28 @@ pub enum ChainExchangeResponseStatus {
     BlockNotFound,
     /// Requester is making too many requests.
     GoAway,
-    /// Internal error occured.
+    /// Internal error occurred.
     InternalError,
     /// Request was bad.
     BadRequest,
     /// Other undefined response code.
     Other(i32),
+}
+
+#[cfg(test)]
+impl quickcheck::Arbitrary for ChainExchangeResponseStatus {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        *g.choose(&[
+            ChainExchangeResponseStatus::Success,
+            ChainExchangeResponseStatus::PartialResponse,
+            ChainExchangeResponseStatus::BlockNotFound,
+            ChainExchangeResponseStatus::GoAway,
+            ChainExchangeResponseStatus::InternalError,
+            ChainExchangeResponseStatus::BadRequest,
+            ChainExchangeResponseStatus::Other(1),
+        ])
+        .unwrap()
+    }
 }
 
 impl Serialize for ChainExchangeResponseStatus {
@@ -97,7 +116,7 @@ impl<'de> Deserialize<'de> for ChainExchangeResponseStatus {
     }
 }
 
-/// The response to a ChainExchange request.
+/// The response to a `ChainExchange` request.
 #[derive(Clone, Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct ChainExchangeResponse {
     /// Status code of the response.
@@ -109,9 +128,10 @@ pub struct ChainExchangeResponse {
 }
 
 impl ChainExchangeResponse {
-    /// Converts chain_exchange response into result.
+    /// Converts `chain_exchange` response into result.
     /// Returns an error if the response status is not `Ok`.
-    /// Tipset bundle is converted into generic return type with `TryFrom` trait impl.
+    /// Tipset bundle is converted into generic return type with `TryFrom` trait
+    /// implementation.
     pub fn into_result<T>(self) -> Result<Vec<T>, String>
     where
         T: TryFrom<TipsetBundle, Error = String>,
@@ -125,15 +145,15 @@ impl ChainExchangeResponse {
         self.chain.into_iter().map(T::try_from).collect()
     }
 }
-/// Contains all bls and secp messages and their indexes per block
-#[derive(Clone, Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
+/// Contains all BLS and SECP messages and their indexes per block
+#[derive(Clone, Debug, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
 pub struct CompactedMessages {
-    /// Unsigned bls messages.
-    pub bls_msgs: Vec<UnsignedMessage>,
+    /// Unsigned BLS messages.
+    pub bls_msgs: Vec<Message>,
     /// Describes which block each message belongs to.
     pub bls_msg_includes: Vec<Vec<u64>>,
 
-    /// Signed secp messages.
+    /// Signed SECP messages.
     pub secp_msgs: Vec<SignedMessage>,
     /// Describes which block each message belongs to.
     pub secp_msg_includes: Vec<Vec<u64>>,
@@ -190,7 +210,8 @@ impl TryFrom<&TipsetBundle> for FullTipset {
     }
 }
 
-/// Constructs a [FullTipset] from headers and compacted messages from a bundle.
+/// Constructs a [`FullTipset`] from headers and compacted messages from a
+/// bundle.
 fn fts_from_bundle_parts(
     headers: Vec<BlockHeader>,
     messages: Option<&CompactedMessages>,
@@ -227,8 +248,7 @@ fn fts_from_bundle_parts(
             let message_count = bls_msg_includes[i].len() + secp_msg_includes[i].len();
             if message_count > BLOCK_MESSAGE_LIMIT {
                 return Err(format!(
-                    "Block {} in bundle has too many messages ({} > {})",
-                    i, message_count, BLOCK_MESSAGE_LIMIT
+                    "Block {i} in bundle has too many messages ({message_count} > {BLOCK_MESSAGE_LIMIT})"
                 ));
             }
             let bls_messages = values_from_indexes(&bls_msg_includes[i], bls_msgs)?;
@@ -243,4 +263,19 @@ fn fts_from_bundle_parts(
         .collect::<Result<_, _>>()?;
 
     FullTipset::new(blocks).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use quickcheck_macros::quickcheck;
+    use serde_json;
+
+    use super::*;
+
+    #[quickcheck]
+    fn chain_exchange_response_status_roundtrip(status: ChainExchangeResponseStatus) {
+        let serialized = serde_json::to_string(&status).unwrap();
+        let parsed = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(status, parsed);
+    }
 }

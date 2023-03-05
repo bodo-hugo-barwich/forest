@@ -1,43 +1,48 @@
 [package]
-name = "message_pool"
-version = "0.1.0"
-authors = ["ChainSafe Systems <info@chainsafe.io>"]
-edition = "2018"
+name = "forest_message_pool"
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
 
 [dependencies]
-address = { package = "forest_address", version = "0.3" }
-vm = { package = "forest_vm", version = "0.3.1" }
-blocks = { package = "forest_blocks", path = "../blocks" }
-message = { package = "forest_message", version = "0.7", features = ["proofs", "json", "blst"] }
-thiserror = "1.0"
-cid = { package = "forest_cid", version = "0.3" }
-encoding = { package = "forest_encoding", version = "0.2.1" }
-blockstore = { package = "ipld_blockstore", version = "0.1" }
-num-bigint = { path = "../../utils/bigint", package = "forest_bigint" }
-lru = "0.7.2"
-crypto = { package = "forest_crypto", version = "0.5", features = ["blst"] }
-chain = { path = "../chain" }
-state_tree = { path = "../../vm/state_tree/" }
-serde = { version = "1.0", features = ["derive"] }
-db = { package = "forest_db", version = "0.1" }
-tokio = { version = "1.0", features = ["sync"] }
-futures = "0.3.5"
-libsecp256k1 = "0.6"
-blake2b_simd = "0.5.10"
-log = "0.4.8"
-async-std = { version = "1.9", features = ["tokio1"] }
-state_manager = { path = "../state_manager" }
-async-trait = "0.1"
-interpreter = { path = "../../vm/interpreter/" }
-types = { package = "fil_types", version = "0.2" }
-forest_libp2p = { path = "../../node/forest_libp2p" }
-num-traits = "0.2"
-statrs = "0.15"
-num-rational = "0.3.2"
-networks = { path = "../../types/networks" }
+ahash.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+cid.workspace = true
+flume.workspace = true
+forest_blocks.workspace = true
+forest_chain.workspace = true
+forest_crypto = { workspace = true, features = ["blst"] }
+forest_db.workspace = true
+forest_libp2p.workspace = true
+forest_message = { workspace = true, features = ["blst"] }
+forest_networks.workspace = true
+forest_shim.workspace = true
+forest_state_manager.workspace = true
+forest_utils.workspace = true
+futures.workspace = true
+fvm3.workspace = true
+fvm_ipld_blockstore.workspace = true
+fvm_ipld_encoding.workspace = true
+fvm_shared = { workspace = true, default-features = false }
+fvm_shared3 = { workspace = true, default-features = false }
+log.workspace = true
+lru.workspace = true
+num-rational.workspace = true
+num-traits.workspace = true
+num.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+serde = { workspace = true, features = ["derive"] }
 slotmap = "1.0"
-rand = "0.8.3"
+statrs = "0.16"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "macros"] }
 
 [dev-dependencies]
-interpreter = { path = "../../vm/interpreter/" }
-key_management = { path = "../../key_management" }
+forest_key_management.workspace = true
+
+[features]
+slow_tests = []

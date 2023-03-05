@@ -1,26 +1,25 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
+use forest_auth::*;
+use forest_beacon::Beacon;
+use forest_rpc_api::{auth_api::*, data_types::RPCState};
+use fvm_ipld_blockstore::Blockstore;
 use jsonrpc_v2::{Data, Error as JsonRpcError, Params};
 
-use auth::*;
-use beacon::Beacon;
-use blockstore::BlockStore;
-use rpc_api::{auth_api::*, data_types::RPCState};
-
 /// RPC call to create a new JWT Token
-pub(crate) async fn auth_new<'a, DB, B>(
+pub(crate) async fn auth_new<DB, B>(
     data: Data<RPCState<DB, B>>,
     Params(params): Params<AuthNewParams>,
 ) -> Result<AuthNewResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore,
+    B: Beacon,
 {
-    let (perms,) = params;
+    let auth_params: AuthNewParams = params;
     let ks = data.keystore.read().await;
     let ki = ks.get(JWT_IDENTIFIER)?;
-    let token = create_token(perms, ki.private_key())?;
+    let token = create_token(auth_params.perms, ki.private_key(), auth_params.token_exp)?;
     Ok(token.as_bytes().to_vec())
 }
 
@@ -30,8 +29,8 @@ pub(crate) async fn auth_verify<DB, B>(
     Params(params): Params<AuthVerifyParams>,
 ) -> Result<AuthVerifyResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore,
+    B: Beacon,
 {
     let ks = data.keystore.read().await;
     let (header_raw,) = params;

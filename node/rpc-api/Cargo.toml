@@ -1,44 +1,45 @@
 [package]
-name = "rpc-api"
-version = "0.1.0"
-authors = ["ChainSafe Systems <info@chainsafe.io>"]
-edition = "2018"
+name = "forest_rpc-api"
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
 
 [dependencies]
 # Internal
-actor = { package = "actor_interface", path = "../../vm/actor_interface" }
-address = { package = "forest_address", version = "0.3", features = ["json"] }
-beacon = { package = "beacon", path = "../../blockchain/beacon", features = ["json"] }
-bitfield = { package = "forest_bitfield", version = "0.1", features = ["json"] }
-blocks = { package = "forest_blocks", path = "../../blockchain/blocks", features = ["json"] }
-blockstore = { package = "ipld_blockstore", version = "0.1" }
-chain = { path = "../../blockchain/chain", features = ["json"] }
-chain_sync = { path = "../../blockchain/chain_sync" }
-cid = { package = "forest_cid", version = "0.3", features = ["json"] }
-clock = { package = "fil_clock", path = "../clock" }
-crypto = { package = "forest_crypto", version = "0.5", features = ["json", "blst"] }
-fil_types = "0.2"
-forest_libp2p = { path = "../forest_libp2p" }
-ipld = { package = "forest_ipld", path = "../../ipld", features = ["json"] }
-message = { package = "forest_message", version = "0.7", features = ["json", "blst"] }
-message_pool = { path = "../../blockchain/message_pool" }
-num-bigint = { path = "../../utils/bigint", package = "forest_bigint", version = "0.1.1" }
-state_manager = { package = "state_manager", path = "../../blockchain/state_manager" }
-vm = { package = "forest_vm", version = "0.3" }
-wallet = { package = "key_management", path = "../../key_management", features = ["json"] }
-# Public
-async-std = { version = "1.9", features = ["attributes"] }
-once_cell = "1.7.2"
-serde = { version = "1.0.101", default-features = false, features = ["derive"] }
-serde_json = "1.0"
-libp2p = { version = "0.40.0-rc.1", default-features = false }
+forest_actor_interface.workspace = true
+forest_beacon.workspace = true
+forest_blocks.workspace = true
+forest_chain.workspace = true
+forest_chain_sync.workspace = true
+forest_ipld.workspace = true
+forest_json.workspace = true
+forest_key_management.workspace = true
+forest_libp2p.workspace = true
+forest_message = { workspace = true, features = ["blst"] }
+forest_message_pool.workspace = true
+forest_shim.workspace = true
+forest_state_manager.workspace = true
 
-[dependencies.jsonrpc-v2]
-version = "0.10.1"
-features = ["easy-errors", "macros", "bytes-v05"]
-default-features = false
+# Public
+ahash.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+cid.workspace = true
+flume.workspace = true
+fvm_ipld_blockstore.workspace = true
+fvm_shared = { workspace = true, default-features = false }
+jsonrpc-v2.workspace = true
+once_cell.workspace = true
+parking_lot.workspace = true
+serde = { workspace = true, default-features = false, features = ["derive"] }
+serde_json.workspace = true
+serde_with.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [build-dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 syn = "1.0"

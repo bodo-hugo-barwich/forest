@@ -1,24 +1,30 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-#![cfg(feature = "test_constructors")]
+use std::convert::TryFrom;
 
-use address::Address;
-use blocks::{Block, BlockHeader, FullTipset, Ticket, Tipset, TipsetKeys, TxMeta};
-use cid::{Cid, Code::Blake2b256};
-use crypto::{Signature, Signer, VRFProof};
-use encoding::to_vec;
+use base64::{prelude::BASE64_STANDARD, Engine};
+use cid::{
+    multihash::{Code::Blake2b256, MultihashDigest},
+    Cid,
+};
+use forest_blocks::{Block, BlockHeader, FullTipset, Ticket, Tipset, TipsetKeys, TxMeta};
+use forest_crypto::VRFProof;
 use forest_libp2p::chain_exchange::{
     ChainExchangeResponse, ChainExchangeResponseStatus, CompactedMessages, TipsetBundle,
 };
-use message::{SignedMessage, UnsignedMessage};
-use num_bigint::BigInt;
-use std::convert::TryFrom;
-use std::error::Error;
+use forest_message::SignedMessage;
+use forest_shim::{
+    address::Address,
+    crypto::Signature,
+    message::{Message, Message_v3},
+};
+use fvm_ipld_encoding::{to_vec, DAG_CBOR};
+use num::BigInt;
 
-/// Defines a TipsetKey used in testing
+/// Defines a `TipsetKey` used in testing
 pub fn template_key(data: &[u8]) -> Cid {
-    cid::new_from_cbor(data, Blake2b256)
+    Cid::new_v1(DAG_CBOR, Blake2b256.digest(data))
 }
 
 /// Defines a block header used in testing
@@ -47,17 +53,17 @@ fn template_header(
         .unwrap()
 }
 
-/// Returns a vec of 4 distinct CIDs
+/// Returns a vector of 4 distinct CIDs
 pub fn construct_keys() -> Vec<Cid> {
-    return vec![
+    vec![
         template_key(b"test content"),
         template_key(b"awesome test content "),
         template_key(b"even better test content"),
         template_key(b"the best test content out there"),
-    ];
+    ]
 }
 
-/// Returns a vec of block headers to be used for testing purposes
+/// Returns a vector of block headers to be used for testing purposes
 pub fn construct_headers(epoch: i64, weight: u64) -> Vec<BlockHeader> {
     let data0: Vec<u8> = vec![1, 4, 3, 6, 7, 1, 2];
     let data1: Vec<u8> = vec![1, 4, 3, 6, 1, 1, 2, 2, 4, 5, 3, 12, 2, 1];
@@ -74,18 +80,18 @@ pub fn construct_headers(epoch: i64, weight: u64) -> Vec<BlockHeader> {
         .unwrap(),
     };
     let bz = to_vec(&meta).unwrap();
-    let msg_root = cid::new_from_cbor(&bz, Blake2b256);
+    let msg_root = Cid::new_v1(DAG_CBOR, Blake2b256.digest(&bz));
 
-    return vec![
+    vec![
         template_header(data0, 1, epoch, msg_root, weight),
         template_header(data1, 2, epoch, msg_root, weight),
         template_header(data2, 3, epoch, msg_root, weight),
-    ];
+    ]
 }
 
 /// Returns a Ticket to be used for testing
 pub fn construct_ticket() -> Ticket {
-    let vrf_result = VRFProof::new(base64::decode("lmRJLzDpuVA7cUELHTguK9SFf+IVOaySG8t/0IbVeHHm3VwxzSNhi1JStix7REw6Apu6rcJQV1aBBkd39gQGxP8Abzj8YXH+RdSD5RV50OJHi35f3ixR0uhkY6+G08vV").unwrap());
+    let vrf_result = VRFProof::new(BASE64_STANDARD.decode("lmRJLzDpuVA7cUELHTguK9SFf+IVOaySG8t/0IbVeHHm3VwxzSNhi1JStix7REw6Apu6rcJQV1aBBkd39gQGxP8Abzj8YXH+RdSD5RV50OJHi35f3ixR0uhkY6+G08vV").unwrap());
     Ticket::new(vrf_result)
 }
 
@@ -125,28 +131,21 @@ pub fn construct_full_tipset() -> FullTipset {
     FullTipset::new(blocks).unwrap()
 }
 
-const DUMMY_SIG: [u8; 1] = [0u8];
-
-struct DummySigner;
-impl Signer for DummySigner {
-    fn sign_bytes(&self, _: &[u8], _: &Address) -> Result<Signature, Box<dyn Error>> {
-        Ok(Signature::new_secp256k1(DUMMY_SIG.to_vec()))
-    }
-}
-
 /// Returns a tuple of unsigned and signed messages used for testing
-pub fn construct_messages() -> (UnsignedMessage, SignedMessage) {
-    let bls_messages = UnsignedMessage::builder()
-        .to(Address::new_id(1))
-        .from(Address::new_id(2))
-        .build()
-        .unwrap();
+pub fn construct_messages() -> (Message, SignedMessage) {
+    let bls_messages: Message = Message_v3 {
+        to: Address::new_id(1).into(),
+        from: Address::new_id(2).into(),
+        ..Message_v3::default()
+    }
+    .into();
 
-    let secp_messages = SignedMessage::new(bls_messages.clone(), &DummySigner).unwrap();
+    let secp_messages =
+        SignedMessage::new_unchecked(bls_messages.clone(), Signature::new_secp256k1(vec![0]));
     (bls_messages, secp_messages)
 }
 
-/// Returns a TipsetBundle used for testing
+/// Returns a `TipsetBundle` used for testing
 pub fn construct_tipset_bundle(epoch: i64, weight: u64) -> TipsetBundle {
     let headers = construct_headers(epoch, weight);
     let (bls, secp) = construct_messages();
@@ -166,14 +165,14 @@ pub fn construct_tipset_bundle(epoch: i64, weight: u64) -> TipsetBundle {
 pub fn construct_dummy_header() -> BlockHeader {
     BlockHeader::builder()
         .miner_address(Address::new_id(1000))
-        .messages(cid::new_from_cbor(&[1, 2, 3], Blake2b256))
-        .message_receipts(cid::new_from_cbor(&[1, 2, 3], Blake2b256))
-        .state_root(cid::new_from_cbor(&[1, 2, 3], Blake2b256))
+        .messages(Cid::new_v1(DAG_CBOR, Blake2b256.digest(&[1, 2, 3])))
+        .message_receipts(Cid::new_v1(DAG_CBOR, Blake2b256.digest(&[1, 2, 3])))
+        .state_root(Cid::new_v1(DAG_CBOR, Blake2b256.digest(&[1, 2, 3])))
         .build()
         .unwrap()
 }
 
-/// Returns a RPCResponse used for testing
+/// Returns a `RPCResponse` used for testing
 pub fn construct_chain_exchange_response() -> ChainExchangeResponse {
     // construct block sync response
     ChainExchangeResponse {

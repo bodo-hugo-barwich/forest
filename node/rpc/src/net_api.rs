@@ -1,21 +1,23 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use futures::channel::oneshot;
-use jsonrpc_v2::{Data, Error as JsonRpcError, Params};
-use log::error;
+use std::str::FromStr;
 
-use beacon::Beacon;
-use blockstore::BlockStore;
+use forest_beacon::Beacon;
+use forest_db::Store;
 use forest_libp2p::{NetRPCMethods, NetworkMessage, PeerId};
-use rpc_api::{
+use forest_rpc_api::{
     data_types::{AddrInfo, RPCState},
     net_api::*,
 };
+use futures::channel::oneshot;
+use fvm_ipld_blockstore::Blockstore;
+use jsonrpc_v2::{Data, Error as JsonRpcError, Params};
+use log::error;
 
 pub(crate) async fn net_addrs_listen<
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore + Store + Clone + Send + Sync + 'static,
+    B: Beacon,
 >(
     data: Data<RPCState<DB, B>>,
 ) -> Result<NetAddrsListenResult, JsonRpcError> {
@@ -24,7 +26,7 @@ pub(crate) async fn net_addrs_listen<
         method: NetRPCMethods::NetAddrsListen(tx),
     };
 
-    data.network_send.send(req).await?;
+    data.network_send.send_async(req).await?;
     let (id, addrs) = rx.await?;
 
     Ok(AddrInfo {
@@ -33,10 +35,7 @@ pub(crate) async fn net_addrs_listen<
     })
 }
 
-pub(crate) async fn net_peers<
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
->(
+pub(crate) async fn net_peers<DB: Blockstore + Store + Clone + Send + Sync + 'static, B: Beacon>(
     data: Data<RPCState<DB, B>>,
 ) -> Result<NetPeersResult, JsonRpcError> {
     let (tx, rx) = oneshot::channel();
@@ -44,7 +43,7 @@ pub(crate) async fn net_peers<
         method: NetRPCMethods::NetPeers(tx),
     };
 
-    data.network_send.send(req).await?;
+    data.network_send.send_async(req).await?;
     let peer_addresses = rx.await?;
 
     let connections = peer_addresses
@@ -59,8 +58,8 @@ pub(crate) async fn net_peers<
 }
 
 pub(crate) async fn net_connect<
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore + Store + Clone + Send + Sync + 'static,
+    B: Beacon,
 >(
     data: Data<RPCState<DB, B>>,
     Params(params): Params<NetConnectParams>,
@@ -74,7 +73,7 @@ pub(crate) async fn net_connect<
         method: NetRPCMethods::NetConnect(tx, peer_id, addrs),
     };
 
-    data.network_send.send(req).await?;
+    data.network_send.send_async(req).await?;
     let success = rx.await?;
 
     if success {
@@ -86,21 +85,21 @@ pub(crate) async fn net_connect<
 }
 
 pub(crate) async fn net_disconnect<
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore + Store + Clone + Send + Sync + 'static,
+    B: Beacon,
 >(
     data: Data<RPCState<DB, B>>,
     Params(params): Params<NetDisconnectParams>,
 ) -> Result<NetDisconnectResult, JsonRpcError> {
     let (id,) = params;
-    let peer_id = PeerId::from_bytes(id.as_bytes())?;
+    let peer_id = PeerId::from_str(&id)?;
 
     let (tx, rx) = oneshot::channel();
     let req = NetworkMessage::JSONRPCRequest {
         method: NetRPCMethods::NetDisconnect(tx, peer_id),
     };
 
-    data.network_send.send(req).await?;
+    data.network_send.send_async(req).await?;
     rx.await?;
 
     Ok(())

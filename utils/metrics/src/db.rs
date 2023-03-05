@@ -1,19 +1,22 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
+use std::path::PathBuf;
+
 use log::error;
-use prometheus::core::{Collector, Desc};
-use prometheus::proto;
-use prometheus::{Gauge, Opts};
+use prometheus::{
+    core::{Collector, Desc},
+    proto, Gauge, Opts,
+};
 
 pub struct DBCollector {
-    db_directory: String,
+    db_directory: PathBuf,
     descs: Vec<Desc>,
     db_size: Gauge,
 }
 
 impl DBCollector {
-    pub fn new(db_directory: String) -> Self {
+    pub fn new(db_directory: PathBuf) -> Self {
         let mut descs: Vec<Desc> = vec![];
         let db_size = Gauge::with_opts(Opts::new(
             "forest_db_size",

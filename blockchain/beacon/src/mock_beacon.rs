@@ -1,12 +1,14 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use crate::{Beacon, BeaconEntry};
+use std::time::Duration;
+
 use async_trait::async_trait;
 use byteorder::{BigEndian, ByteOrder};
-use encoding::blake2b_256;
-use std::error::Error;
-use std::time::Duration;
+use forest_encoding::blake2b_256;
+use forest_shim::version::NetworkVersion;
+
+use crate::{Beacon, BeaconEntry};
 
 /// Mock beacon used for testing. Deterministic based on an interval.
 pub struct MockBeacon {
@@ -30,20 +32,16 @@ impl MockBeacon {
 
 #[async_trait]
 impl Beacon for MockBeacon {
-    async fn verify_entry(
-        &self,
-        curr: &BeaconEntry,
-        prev: &BeaconEntry,
-    ) -> Result<bool, Box<dyn Error>> {
+    fn verify_entry(&self, curr: &BeaconEntry, prev: &BeaconEntry) -> Result<bool, anyhow::Error> {
         let oe = Self::entry_for_index(prev.round());
         Ok(oe.data() == curr.data())
     }
 
-    async fn entry(&self, round: u64) -> Result<BeaconEntry, Box<dyn Error>> {
+    async fn entry(&self, round: u64) -> Result<BeaconEntry, anyhow::Error> {
         Ok(Self::entry_for_index(round))
     }
 
-    fn max_beacon_round_for_epoch(&self, fil_epoch: i64) -> u64 {
+    fn max_beacon_round_for_epoch(&self, _network_version: NetworkVersion, fil_epoch: i64) -> u64 {
         fil_epoch as u64
     }
 }

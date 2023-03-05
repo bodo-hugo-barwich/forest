@@ -1,15 +1,18 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use blocks::{tipset::tipset_json::TipsetJsonRef, Tipset};
-use chrono::{DateTime, Duration, Utc};
-use clock::ChainEpoch;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::fmt;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
-/// Current state of the ChainSyncer using the ChainExchange protocol.
-#[derive(PartialEq, Debug, Clone, Copy)]
+use forest_blocks::{
+    tipset::tipset_json::{TipsetJson, TipsetJsonRef},
+    Tipset,
+};
+use fvm_shared::clock::ChainEpoch;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use time::{Duration, OffsetDateTime};
+
+/// Current state of the `ChainSyncer` using the `ChainExchange` protocol.
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum SyncStage {
     /// Idle state.
     Idle,
@@ -19,15 +22,29 @@ pub enum SyncStage {
     PersistHeaders,
     /// Syncing messages and performing state transitions.
     Messages,
-    /// ChainSync completed and is following chain.
+    /// `ChainSync` completed and is following chain.
     Complete,
-    /// Error has occured while syncing.
+    /// Error has occurred while syncing.
     Error,
 }
 
 impl Default for SyncStage {
     fn default() -> Self {
         Self::Headers
+    }
+}
+
+#[cfg(test)]
+impl quickcheck::Arbitrary for SyncStage {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        *g.choose(&[
+            SyncStage::Idle,
+            SyncStage::Headers,
+            SyncStage::PersistHeaders,
+            SyncStage::Messages,
+            SyncStage::Complete,
+        ])
+        .unwrap()
     }
 }
 
@@ -64,7 +81,7 @@ impl<'de> Deserialize<'de> for SyncStage {
             "idle worker" => SyncStage::Idle,
             "header sync" => SyncStage::Headers,
             "persisting headers" => SyncStage::PersistHeaders,
-            "message synce" => SyncStage::Messages,
+            "message sync" => SyncStage::Messages,
             "complete" => SyncStage::Complete,
             _ => SyncStage::Error,
         };
@@ -74,7 +91,7 @@ impl<'de> Deserialize<'de> for SyncStage {
 }
 
 /// State of the node's syncing process.
-/// This state is different from the general state of the ChainSync process.
+/// This state is different from the general state of the `ChainSync` process.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SyncState {
     base: Option<Arc<Tipset>>,
@@ -83,38 +100,62 @@ pub struct SyncState {
     stage: SyncStage,
     epoch: ChainEpoch,
 
-    start: Option<DateTime<Utc>>,
-    end: Option<DateTime<Utc>>,
+    start: Option<OffsetDateTime>,
+    end: Option<OffsetDateTime>,
     message: String,
 }
 
+#[cfg(test)]
+impl quickcheck::Arbitrary for SyncState {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        SyncState {
+            base: Option::arbitrary(g),
+            target: Option::arbitrary(g),
+            stage: SyncStage::arbitrary(g),
+            epoch: ChainEpoch::arbitrary(g),
+            start: if bool::arbitrary(g) {
+                None
+            } else {
+                Some(OffsetDateTime::UNIX_EPOCH)
+            },
+            end: if bool::arbitrary(g) {
+                None
+            } else {
+                Some(OffsetDateTime::UNIX_EPOCH)
+            },
+            message: String::arbitrary(g),
+        }
+    }
+}
+
 impl SyncState {
-    /// Initializes the syncing state with base and target tipsets and sets start time.
+    /// Initializes the syncing state with base and target tipsets and sets
+    /// start time.
     pub fn init(&mut self, base: Arc<Tipset>, target: Arc<Tipset>) {
         *self = Self {
             target: Some(target),
             base: Some(base),
-            start: Some(Utc::now()),
+            start: Some(OffsetDateTime::now_utc()),
             ..Default::default()
         }
     }
 
-    /// Get the current [SyncStage] of the Syncer
+    /// Get the current [`SyncStage`] of the `Syncer`
     pub fn stage(&self) -> SyncStage {
         self.stage
     }
 
-    /// Returns the current [Tipset]
+    /// Returns the current [`Tipset`]
     pub fn target(&self) -> &Option<Arc<Tipset>> {
         &self.target
     }
 
-    /// Return a reference to the base [Tipset]
+    /// Return a reference to the base [`Tipset`]
     pub fn base(&self) -> &Option<Arc<Tipset>> {
         &self.base
     }
 
-    /// Return the current [ChainEpoch]
+    /// Return the current [`ChainEpoch`]
     pub fn epoch(&self) -> ChainEpoch {
         self.epoch
     }
@@ -123,17 +164,18 @@ impl SyncState {
     /// Returns `None` if syncing has not started
     pub fn get_elapsed_time(&self) -> Option<Duration> {
         if let Some(start) = self.start {
-            let elapsed_time = Utc::now() - start;
+            let elapsed_time = OffsetDateTime::now_utc() - start;
             Some(elapsed_time)
         } else {
             None
         }
     }
 
-    /// Sets the sync stage for the syncing state. If setting to complete, sets end timer to now.
+    /// Sets the sync stage for the syncing state. If setting to complete, sets
+    /// end timer to now.
     pub fn set_stage(&mut self, stage: SyncStage) {
         if let SyncStage::Complete = stage {
-            self.end = Some(Utc::now());
+            self.end = Some(OffsetDateTime::now_utc());
         }
         self.stage = stage;
     }
@@ -147,7 +189,7 @@ impl SyncState {
     pub fn error(&mut self, err: String) {
         self.message = err;
         self.stage = SyncStage::Error;
-        self.end = Some(Utc::now());
+        self.end = Some(OffsetDateTime::now_utc());
     }
 }
 
@@ -165,8 +207,8 @@ impl Serialize for SyncState {
             stage: SyncStage,
             epoch: ChainEpoch,
 
-            start: &'a Option<DateTime<Utc>>,
-            end: &'a Option<DateTime<Utc>>,
+            start: &'a Option<OffsetDateTime>,
+            end: &'a Option<OffsetDateTime>,
             message: &'a str,
         }
 
@@ -191,17 +233,15 @@ impl<'de> Deserialize<'de> for SyncState {
         #[derive(Deserialize)]
         #[serde(rename_all = "PascalCase")]
         struct SyncStateDe {
-            #[serde(with = "blocks::tipset_json")]
-            base: Arc<Tipset>,
-            #[serde(with = "blocks::tipset_json")]
-            target: Arc<Tipset>,
+            base: Option<TipsetJson>,
+            target: Option<TipsetJson>,
 
             #[serde(with = "super::SyncStage")]
             stage: SyncStage,
             epoch: ChainEpoch,
 
-            start: Option<DateTime<Utc>>,
-            end: Option<DateTime<Utc>>,
+            start: Option<OffsetDateTime>,
+            end: Option<OffsetDateTime>,
             message: String,
         }
 
@@ -215,8 +255,8 @@ impl<'de> Deserialize<'de> for SyncState {
             message,
         } = Deserialize::deserialize(deserializer)?;
         Ok(SyncState {
-            base: Some(base),
-            target: Some(target),
+            base: base.map(Into::into),
+            target: target.map(Into::into),
             stage,
             epoch,
             start,
@@ -227,8 +267,9 @@ impl<'de> Deserialize<'de> for SyncState {
 }
 
 pub mod json {
-    use super::SyncState;
     use serde::{Deserialize, Serialize};
+
+    use super::SyncState;
 
     #[derive(Serialize, Deserialize, Debug)]
     #[serde(transparent)]
@@ -248,8 +289,7 @@ pub mod json {
 pub mod vec {
     use serde::ser::SerializeSeq;
 
-    use super::json::SyncStateRef;
-    use super::*;
+    use super::{json::SyncStateRef, *};
 
     #[derive(Serialize)]
     #[serde(transparent)]
@@ -264,5 +304,19 @@ pub mod vec {
             seq.serialize_element(&SyncStateRef(e))?;
         }
         seq.end()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quickcheck_macros::quickcheck;
+
+    use super::*;
+
+    #[quickcheck]
+    fn sync_state_roundtrip(ss: SyncState) {
+        let serialized = serde_json::to_string(&ss).unwrap();
+        let parsed = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(ss, parsed);
     }
 }

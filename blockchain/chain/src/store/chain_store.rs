@@ -1,58 +1,75 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use super::{index::ChainIndex, tipset_tracker::TipsetTracker, Error};
-use actor::{miner, power};
-use address::Address;
-use async_std::channel::{self, bounded, Receiver};
-use async_std::sync::RwLock;
-use async_std::task;
-use beacon::{BeaconEntry, IGNORE_DRAND_VAR};
-use blocks::{Block, BlockHeader, FullTipset, Tipset, TipsetKeys, TxMeta};
-use cid::Cid;
-use cid::Code::Blake2b256;
-use clock::ChainEpoch;
-use crossbeam::atomic::AtomicCell;
-use encoding::{de::DeserializeOwned, from_slice, Cbor};
-use forest_car::CarHeader;
-use forest_ipld::recurse_links;
-use futures::AsyncWrite;
-use interpreter::BlockMessages;
-use ipld_amt::Amt;
-use ipld_blockstore::BlockStore;
-use lockfree::map::Map as LockfreeMap;
+use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc, time::SystemTime};
+
+use ahash::{HashMap, HashMapExt};
+use anyhow::Result;
+use async_stream::stream;
+use bls_signatures::Serialize as SerializeBls;
+use cid::{
+    multihash::{Code, Code::Blake2b256},
+    Cid,
+};
+use digest::Digest;
+use forest_actor_interface::EPOCHS_IN_DAY;
+use forest_beacon::{BeaconEntry, IGNORE_DRAND_VAR};
+use forest_blocks::{Block, BlockHeader, FullTipset, Tipset, TipsetKeys, TxMeta};
+use forest_db::Store;
+use forest_encoding::de::DeserializeOwned;
+use forest_interpreter::BlockMessages;
+use forest_ipld::{recurse_links_hash, CidHashSet};
+use forest_libp2p_bitswap::{BitswapStoreRead, BitswapStoreReadWrite};
+use forest_message::{ChainMessage, Message as MessageTrait, SignedMessage};
+use forest_metrics::metrics;
+use forest_networks::ChainConfig;
+use forest_shim::{
+    address::Address,
+    crypto::{Signature, SignatureType},
+    econ::TokenAmount,
+    executor::Receipt,
+    message::Message,
+    state_tree::StateTree,
+};
+use forest_utils::{db::BlockstoreExt, io::Checksum};
+use futures::Future;
+use fvm_ipld_amt::Amtv0 as Amt;
+use fvm_ipld_blockstore::Blockstore;
+use fvm_ipld_car::CarHeader;
+use fvm_ipld_encoding::{from_slice, Cbor};
+use fvm_shared::clock::ChainEpoch;
 use log::{debug, info, trace, warn};
 use lru::LruCache;
-use message::{ChainMessage, Message, MessageReceipt, SignedMessage, UnsignedMessage};
-use num_bigint::{BigInt, Integer};
-use num_traits::Zero;
+use parking_lot::Mutex;
 use serde::Serialize;
-use state_tree::StateTree;
-use std::error::Error as StdError;
-use std::sync::Arc;
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    time::SystemTime,
+use tokio::{
+    io::AsyncWrite,
+    sync::{
+        broadcast::{self, Sender as Publisher},
+        Mutex as TokioMutex,
+    },
 };
-use tokio::sync::broadcast::{self, error::RecvError, Sender as Publisher};
+use tokio_util::compat::TokioAsyncWriteCompatExt;
+
+use super::{
+    index::{checkpoint_tipsets, ChainIndex},
+    tipset_tracker::TipsetTracker,
+    Error,
+};
+use crate::Scale;
 
 const GENESIS_KEY: &str = "gen_block";
 const HEAD_KEY: &str = "head";
 const BLOCK_VAL_PREFIX: &[u8] = b"block_val/";
 
-// constants for Weight calculation
-/// The ratio of weight contributed by short-term vs long-term factors in a given round
-const W_RATIO_NUM: u64 = 1;
-const W_RATIO_DEN: u64 = 2;
-/// Blocks epoch allowed
-const BLOCKS_PER_EPOCH: u64 = 5;
-
 // A cap on the size of the future_sink
 const SINK_CAP: usize = 200;
 
-const DEFAULT_TIPSET_CACHE_SIZE: usize = 8192;
+const DEFAULT_TIPSET_CACHE_SIZE: NonZeroUsize =
+    forest_utils::const_option!(NonZeroUsize::new(8192));
 
-/// Enum for pubsub channel that defines message type variant and data contained in message type.
+/// `Enum` for `pubsub` channel that defines message type variant and data
+/// contained in message type.
 #[derive(Clone, Debug)]
 pub enum HeadChange {
     Current(Arc<Tipset>),
@@ -60,102 +77,146 @@ pub enum HeadChange {
     Revert(Arc<Tipset>),
 }
 
-/// Stores chain data such as heaviest tipset and cached tipset info at each epoch.
-/// This structure is threadsafe, and all caches are wrapped in a mutex to allow a consistent
-/// `ChainStore` to be shared across tasks.
+/// Stores chain data such as heaviest tipset and cached tipset info at each
+/// epoch. This structure is thread-safe, and all caches are wrapped in a mutex
+/// to allow a consistent `ChainStore` to be shared across tasks.
 pub struct ChainStore<DB> {
     /// Publisher for head change events
     publisher: Publisher<HeadChange>,
 
-    /// Tracks head change subscription channels
-    subscriptions: Arc<LockfreeMap<i64, Option<Receiver<HeadChange>>>>,
-
-    /// Keeps track of how many subscriptions there are in order to auto-increment the subscription ID
-    subscriptions_count: AtomicCell<usize>,
-
-    /// key-value datastore.
-    pub db: Arc<DB>,
+    /// key-value `datastore`.
+    pub db: DB,
 
     /// Tipset at the head of the best-known chain.
-    heaviest: RwLock<Option<Arc<Tipset>>>,
+    heaviest: Mutex<Arc<Tipset>>,
 
     /// Caches loaded tipsets for fast retrieval.
     ts_cache: Arc<TipsetCache>,
 
-    /// Used as a cache for tipset lookbacks.
+    /// Used as a cache for tipset `lookbacks`.
     chain_index: ChainIndex<DB>,
 
     /// Tracks blocks for the purpose of forming tipsets.
     tipset_tracker: TipsetTracker<DB>,
 }
 
-impl<DB> ChainStore<DB>
+impl<DB> BitswapStoreRead for ChainStore<DB>
 where
-    DB: BlockStore + Send + Sync + 'static,
+    DB: BitswapStoreRead,
 {
-    pub fn new(db: Arc<DB>) -> Self {
-        let (publisher, _) = broadcast::channel(SINK_CAP);
-        let ts_cache = Arc::new(RwLock::new(LruCache::new(DEFAULT_TIPSET_CACHE_SIZE)));
-        let cs = Self {
-            publisher,
-            subscriptions: Default::default(),
-            subscriptions_count: Default::default(),
-            chain_index: ChainIndex::new(ts_cache.clone(), db.clone()),
-            tipset_tracker: TipsetTracker::new(db.clone()),
-            db,
-            ts_cache,
-            heaviest: Default::default(),
-        };
-
-        // Result intentionally ignored, doesn't matter if heaviest doesn't exist in store yet
-        let _ = task::block_on(cs.load_heaviest_tipset());
-
-        cs
+    fn contains(&self, cid: &Cid) -> anyhow::Result<bool> {
+        self.db.contains(cid)
     }
 
-    /// Sets heaviest tipset within ChainStore and store its tipset cids under HEAD_KEY
-    pub async fn set_heaviest_tipset(&self, ts: Arc<Tipset>) -> Result<(), Error> {
+    fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+        self.db.get(cid)
+    }
+}
+
+impl<DB> BitswapStoreReadWrite for ChainStore<DB>
+where
+    DB: BitswapStoreReadWrite,
+{
+    type Params = <DB as BitswapStoreReadWrite>::Params;
+
+    fn insert(&self, block: &libipld::Block<Self::Params>) -> anyhow::Result<()> {
+        self.db.insert(block)
+    }
+}
+
+impl<DB> ChainStore<DB>
+where
+    DB: Blockstore + Store + Send + Sync,
+{
+    pub fn new(
+        db: DB,
+        chain_config: Arc<ChainConfig>,
+        genesis_block_header: &BlockHeader,
+    ) -> Result<Self>
+    where
+        DB: Clone,
+    {
+        let (publisher, _) = broadcast::channel(SINK_CAP);
+        let ts_cache = Arc::new(Mutex::new(LruCache::new(DEFAULT_TIPSET_CACHE_SIZE)));
+        let genesis_ts = Arc::new(Tipset::from(genesis_block_header));
+        let cs = Self {
+            publisher,
+            // subscriptions: Default::default(),
+            // subscriptions_count: Default::default(),
+            chain_index: ChainIndex::new(ts_cache.clone(), db.clone()),
+            tipset_tracker: TipsetTracker::new(db.clone(), chain_config),
+            db,
+            ts_cache,
+            heaviest: Mutex::new(genesis_ts.clone()),
+        };
+
+        // Result intentionally ignored, doesn't matter if heaviest doesn't exist in
+        // store yet
+        let _ = cs.load_heaviest_tipset();
+
+        cs.set_genesis(genesis_block_header)?;
+
+        if cs.blockstore().read(HEAD_KEY)?.is_none() {
+            cs.set_heaviest_tipset(genesis_ts)?;
+        }
+
+        Ok(cs)
+    }
+
+    /// Sets heaviest tipset within `ChainStore` and store its tipset keys under
+    /// `HEAD_KEY`
+    pub fn set_heaviest_tipset(&self, ts: Arc<Tipset>) -> Result<(), Error> {
         self.db.write(HEAD_KEY, ts.key().marshal_cbor()?)?;
-        *self.heaviest.write().await = Some(ts.clone());
+        *self.heaviest.lock() = ts.clone();
         if self.publisher.send(HeadChange::Apply(ts)).is_err() {
             debug!("did not publish head change, no active receivers");
         }
         Ok(())
     }
 
-    /// Writes genesis to blockstore.
+    /// Writes genesis to `blockstore`.
     pub fn set_genesis(&self, header: &BlockHeader) -> Result<Cid, Error> {
-        set_genesis(self.blockstore(), header)
+        self.blockstore()
+            .write(GENESIS_KEY, header.marshal_cbor()?)?;
+        self.blockstore()
+            .put_obj(&header, Blake2b256)
+            .map_err(|e| Error::Other(e.to_string()))
     }
 
-    /// Adds a [BlockHeader] to the tipset tracker, which tracks valid headers.
-    pub async fn add_to_tipset_tracker(&self, header: &BlockHeader) {
-        self.tipset_tracker.add(header).await;
+    /// Adds a [`BlockHeader`] to the tipset tracker, which tracks valid
+    /// headers.
+    pub fn add_to_tipset_tracker(&self, header: &BlockHeader) {
+        self.tipset_tracker.add(header);
     }
 
-    /// Writes tipset block headers to data store and updates heaviest tipset with other
-    /// compatible tracked headers.
-    pub async fn put_tipset(&self, ts: &Tipset) -> Result<(), Error> {
+    /// Writes tipset block headers to data store and updates heaviest tipset
+    /// with other compatible tracked headers.
+    pub fn put_tipset<S>(&self, ts: &Tipset) -> Result<(), Error>
+    where
+        S: Scale,
+    {
         // TODO: we could add the blocks of `ts` to the tipset tracker from here,
         // making `add_to_tipset_tracker` redundant and decreasing the number of
-        // blockstore reads
+        // `blockstore` reads
         persist_objects(self.blockstore(), ts.blocks())?;
 
         // Expand tipset to include other compatible blocks at the epoch.
-        let expanded = self.expand_tipset(ts.min_ticket_block().clone()).await?;
-        self.update_heaviest(Arc::new(expanded)).await?;
+        let expanded = self.expand_tipset(ts.min_ticket_block().clone())?;
+        self.update_heaviest::<S>(Arc::new(expanded))?;
         Ok(())
     }
 
-    /// Expands tipset to tipset with all other headers in the same epoch using the tipset tracker.
-    async fn expand_tipset(&self, header: BlockHeader) -> Result<Tipset, Error> {
-        self.tipset_tracker.expand(header).await
+    /// Expands tipset to tipset with all other headers in the same epoch using
+    /// the tipset tracker.
+    fn expand_tipset(&self, header: BlockHeader) -> Result<Tipset, Error> {
+        self.tipset_tracker.expand(header)
     }
 
-    /// Loads heaviest tipset from datastore and sets as heaviest in chainstore.
-    async fn load_heaviest_tipset(&self) -> Result<(), Error> {
+    /// Loads heaviest tipset from `datastore` and sets as heaviest in
+    /// `chainstore`.
+    fn load_heaviest_tipset(&self) -> Result<(), Error> {
         let heaviest_ts = match self.db.read(HEAD_KEY)? {
-            Some(bz) => self.tipset_from_keys(&from_slice(&bz)?).await?,
+            Some(bz) => self.tipset_from_keys(&from_slice(&bz)?)?,
             None => {
                 warn!("No previous chain state found");
                 return Err(Error::Other("No chain state found".to_owned()));
@@ -163,19 +224,23 @@ where
         };
 
         // set as heaviest tipset
-        *self.heaviest.write().await = Some(heaviest_ts);
+        *self.heaviest.lock() = heaviest_ts;
         Ok(())
     }
 
-    /// Returns genesis [BlockHeader] from the store based on a static key.
-    pub fn genesis(&self) -> Result<Option<BlockHeader>, Error> {
-        genesis(self.blockstore())
+    /// Returns genesis [`BlockHeader`] from the store based on a static key.
+    pub fn genesis(&self) -> Result<BlockHeader, Error> {
+        self.blockstore()
+            .read(GENESIS_KEY)?
+            .map(|bz| BlockHeader::unmarshal_cbor(&bz).map_err(|e| Error::Other(e.to_string())))
+            .ok_or(Error::Other(
+                "Genesis key not defined in database".to_string(),
+            ))?
     }
 
     /// Returns the currently tracked heaviest tipset.
-    pub async fn heaviest_tipset(&self) -> Option<Arc<Tipset>> {
-        // TODO: Figure out how to remove optional and return something everytime.
-        self.heaviest.read().await.clone()
+    pub fn heaviest_tipset(&self) -> Arc<Tipset> {
+        self.heaviest.lock().clone()
     }
 
     /// Returns a reference to the publisher of head changes.
@@ -188,58 +253,53 @@ where
         &self.db
     }
 
-    /// Clones blockstore `Arc`.
-    pub fn blockstore_cloned(&self) -> Arc<DB> {
-        self.db.clone()
-    }
-
-    /// Returns Tipset from key-value store from provided cids
-    pub async fn tipset_from_keys(&self, tsk: &TipsetKeys) -> Result<Arc<Tipset>, Error> {
+    /// Returns Tipset from key-value store from provided CIDs
+    pub fn tipset_from_keys(&self, tsk: &TipsetKeys) -> Result<Arc<Tipset>, Error> {
         if tsk.cids().is_empty() {
-            return Ok(self.heaviest_tipset().await.unwrap());
+            return Ok(self.heaviest_tipset());
         }
-        tipset_from_keys(&self.ts_cache, self.blockstore(), tsk).await
+        tipset_from_keys(&self.ts_cache, self.blockstore(), tsk)
     }
 
-    /// Determines if provided tipset is heavier than existing known heaviest tipset
-    async fn update_heaviest(&self, ts: Arc<Tipset>) -> Result<(), Error> {
+    /// Returns Tipset key hash from key-value store from provided CIDs
+    pub fn tipset_hash_from_keys(&self, tsk: &TipsetKeys) -> String {
+        checkpoint_tipsets::tipset_hash(tsk)
+    }
+
+    /// Determines if provided tipset is heavier than existing known heaviest
+    /// tipset
+    fn update_heaviest<S>(&self, ts: Arc<Tipset>) -> Result<(), Error>
+    where
+        S: Scale,
+    {
         // Calculate heaviest weight before matching to avoid deadlock with mutex
-        let heaviest_weight = self
-            .heaviest
-            .read()
-            .await
-            .as_ref()
-            .map(|ts| weight(self.db.as_ref(), ts.as_ref()));
-        match heaviest_weight {
-            Some(heaviest) => {
-                let new_weight = weight(self.blockstore(), ts.as_ref())?;
-                let curr_weight = heaviest?;
-                if new_weight > curr_weight {
-                    // TODO potentially need to deal with re-orgs here
-                    info!("New heaviest tipset: {:?}", ts.key());
-                    self.set_heaviest_tipset(ts).await?;
-                }
-            }
-            None => {
-                info!("set heaviest tipset");
-                self.set_heaviest_tipset(ts).await?;
-            }
+        let heaviest_weight = S::weight(self.blockstore(), self.heaviest.lock().as_ref())?;
+
+        let new_weight = S::weight(self.blockstore(), ts.as_ref())?;
+        let curr_weight = heaviest_weight;
+
+        if new_weight > curr_weight {
+            // TODO potentially need to deal with re-orgs here
+            info!("New heaviest tipset: {:?}", ts.key());
+            self.set_heaviest_tipset(ts)?;
         }
         Ok(())
     }
 
-    /// Checks store if block has already been validated. Key based on the block validation prefix.
+    /// Checks store if block has already been validated. Key based on the block
+    /// validation prefix.
     pub fn is_block_validated(&self, cid: &Cid) -> Result<bool, Error> {
         let key = block_validation_key(cid);
 
         Ok(self.db.exists(key)?)
     }
 
-    /// Marks block as validated in the store. This is retrieved using the block validation prefix.
+    /// Marks block as validated in the store. This is retrieved using the block
+    /// validation prefix.
     pub fn mark_block_as_validated(&self, cid: &Cid) -> Result<(), Error> {
         let key = block_validation_key(cid);
 
-        Ok(self.db.write(key, &[])?)
+        Ok(self.db.write(key, [])?)
     }
 
     /// Returns the tipset behind `tsk` at a given `height`.
@@ -247,8 +307,9 @@ where
     /// - If `prev` is `true`, the tipset before the null round is returned.
     /// - If `prev` is `false`, the tipset following the null round is returned.
     ///
-    /// Returns `None` if the tipset provided was the tipset at the given height.
-    pub async fn tipset_by_height(
+    /// Returns `None` if the tipset provided was the tipset at the given
+    /// height.
+    pub fn tipset_by_height(
         &self,
         height: ChainEpoch,
         ts: Arc<Tipset>,
@@ -260,13 +321,10 @@ where
             ));
         }
         if height == ts.epoch() {
-            return Ok(ts.clone());
+            return Ok(ts);
         }
 
-        let mut lbts = self
-            .chain_index
-            .get_tipset_by_height(ts.clone(), height)
-            .await?;
+        let mut lbts = self.chain_index.get_tipset_by_height(ts.clone(), height)?;
 
         if lbts.epoch() < height {
             warn!(
@@ -275,19 +333,65 @@ where
             );
             lbts = self
                 .chain_index
-                .get_tipset_by_height_without_cache(ts, height)
-                .await?;
+                .get_tipset_by_height_without_cache(ts, height)?;
         }
 
         if lbts.epoch() == height || !prev {
             Ok(lbts)
         } else {
-            self.tipset_from_keys(lbts.parents()).await
+            self.tipset_from_keys(lbts.parents())
         }
     }
 
+    pub fn validate_tipset_checkpoints(
+        &self,
+        from: Arc<Tipset>,
+        network: String,
+    ) -> Result<(), Error> {
+        info!(
+            "Validating {network} tipset checkpoint hashes from: {}",
+            from.epoch()
+        );
+
+        let Some(mut hashes) = checkpoint_tipsets::get_tipset_hashes(&network) else {
+            info!("No checkpoint tipsets found for network: {network}, skipping validation.");
+            return Ok(());
+        };
+
+        let mut ts = from;
+        let tipset_hash = checkpoint_tipsets::tipset_hash(ts.key());
+        hashes.remove(&tipset_hash);
+
+        loop {
+            let pts = self.chain_index.load_tipset(ts.parents())?;
+            let tipset_hash = checkpoint_tipsets::tipset_hash(ts.key());
+            hashes.remove(&tipset_hash);
+
+            ts = pts;
+
+            if ts.epoch() == 0 {
+                break;
+            }
+        }
+
+        if !hashes.is_empty() {
+            return Err(Error::Other(format!(
+                "Found tipset hash(es) on {network} that are no longer valid: {hashes:?}"
+            )));
+        }
+
+        if !checkpoint_tipsets::validate_genesis_cid(ts.key(), &network) {
+            return Err(Error::Other(format!(
+                "Genesis cid {:?} on {network} network does not match with one stored in checkpoint registry",
+                ts.key().cid()
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Finds the latest beacon entry given a tipset up to 20 tipsets behind
-    pub async fn latest_beacon_entry(&self, ts: &Tipset) -> Result<BeaconEntry, Error> {
+    pub fn latest_beacon_entry(&self, ts: &Tipset) -> Result<BeaconEntry, Error> {
         let check_for_beacon_entry = |ts: &Tipset| {
             let cbe = ts.min_ticket_block().beacon_entries();
             if let Some(entry) = cbe.last() {
@@ -304,10 +408,10 @@ where
         if let Some(entry) = check_for_beacon_entry(ts)? {
             return Ok(entry);
         }
-        let mut cur = self.tipset_from_keys(ts.parents()).await?;
+        let mut cur = self.tipset_from_keys(ts.parents())?;
         for i in 1..20 {
             if i != 1 {
-                cur = self.tipset_from_keys(cur.parents()).await?;
+                cur = self.tipset_from_keys(cur.parents())?;
             }
             if let Some(entry) = check_for_beacon_entry(&cur)? {
                 return Ok(entry);
@@ -326,10 +430,11 @@ where
         ))
     }
 
-    /// Constructs and returns a full tipset if messages from storage exists - non self version
+    /// Constructs and returns a full tipset if messages from storage exists -
+    /// non self version
     pub fn fill_tipset(&self, ts: &Tipset) -> Option<FullTipset>
     where
-        DB: BlockStore,
+        DB: Blockstore,
     {
         // Collect all messages before moving tipset.
         let messages: Vec<(Vec<_>, Vec<_>)> = match ts
@@ -363,12 +468,14 @@ where
     }
 
     /// Retrieves block messages to be passed through the VM.
+    ///
+    /// It removes duplicate messages which appear in multiple blocks.
     pub fn block_msgs_for_tipset(&self, ts: &Tipset) -> Result<Vec<BlockMessages>, Error> {
         let mut applied = HashMap::new();
         let mut select_msg = |m: ChainMessage| -> Option<ChainMessage> {
             // The first match for a sender is guaranteed to have correct nonce
             // the block isn't valid otherwise.
-            let entry = applied.entry(*m.from()).or_insert_with(|| m.sequence());
+            let entry = applied.entry(m.from()).or_insert_with(|| m.sequence());
 
             if *entry != m.sequence() {
                 return None;
@@ -406,200 +513,131 @@ where
             .collect()
     }
 
-    async fn parent_state_tsk<'a>(&self, key: &TipsetKeys) -> Result<StateTree<'_, DB>, Error> {
-        let ts = self.tipset_from_keys(key).await?;
-        StateTree::new_from_root(&*self.db, ts.parent_state())
-            .map_err(|e| Error::Other(format!("Could not get actor state {:?}", e)))
-    }
-
-    /// Retrieves ordered valid messages from a `Tipset`. This will only include messages that will
-    /// be passed through the VM.
+    /// Retrieves ordered valid messages from a `Tipset`. This will only include
+    /// messages that will be passed through the VM.
     pub fn messages_for_tipset(&self, ts: &Tipset) -> Result<Vec<ChainMessage>, Error> {
         let bmsgs = self.block_msgs_for_tipset(ts)?;
-        Ok(bmsgs.into_iter().map(|bm| bm.messages).flatten().collect())
+        Ok(bmsgs.into_iter().flat_map(|bm| bm.messages).collect())
     }
 
-    /// get miner state given address and tipsetkeys
-    pub async fn miner_load_actor_tsk(
-        &self,
-        address: &Address,
-        tsk: &TipsetKeys,
-    ) -> Result<miner::State, Error> {
-        let state = self.parent_state_tsk(tsk).await?;
-        let actor = state
-            .get_actor(address)
-            .map_err(|_| Error::Other("Failure getting actor".to_string()))?
-            .ok_or_else(|| Error::Other("Could not init State Tree".to_string()))?;
-
-        Ok(miner::State::load(self.blockstore(), &actor)?)
-    }
-
-    /// Exports a range of tipsets, as well as the state roots based on the `recent_roots`.
-    pub async fn export<W>(
+    /// Exports a range of tipsets, as well as the state roots based on the
+    /// `recent_roots`.
+    pub async fn export<W, D>(
         &self,
         tipset: &Tipset,
         recent_roots: ChainEpoch,
-        skip_old_msgs: bool,
-        mut writer: W,
-    ) -> Result<(), Error>
+        writer: W,
+    ) -> Result<digest::Output<D>, Error>
     where
-        W: AsyncWrite + Send + Unpin + 'static,
+        D: Digest,
+        W: AsyncWrite + Checksum<D> + Send + Unpin + 'static,
     {
         // Channel cap is equal to buffered write size
         const CHANNEL_CAP: usize = 1000;
-        let (tx, mut rx) = bounded(CHANNEL_CAP);
+        let (tx, rx) = flume::bounded(CHANNEL_CAP);
         let header = CarHeader::from(tipset.key().cids().to_vec());
 
+        let writer = Arc::new(TokioMutex::new(writer.compat_write()));
+        let writer_clone = writer.clone();
+
         // Spawns task which receives blocks to write to the car writer.
-        let write_task =
-            task::spawn(async move { header.write_stream_async(&mut writer, &mut rx).await });
+        let write_task = tokio::task::spawn(async move {
+            let mut writer = writer_clone.lock().await;
+            header
+                .write_stream_async(
+                    &mut *writer,
+                    &mut Box::pin(stream! {
+                        while let Ok(val) = rx.recv_async().await {
+                            yield val;
+                        }
+                    }),
+                )
+                .await
+                .map_err(|e| Error::Other(format!("Failed to write blocks in export: {e}")))
+        });
 
         let global_pre_time = SystemTime::now();
         info!("chain export started");
 
-        // Walks over tipset and historical data, sending all blocks visited into the car writer.
-        Self::walk_snapshot(tipset, recent_roots, skip_old_msgs, |cid| {
-            let block = self
-                .blockstore()
-                .get_bytes(&cid)?
-                .ok_or_else(|| format!("Cid {} not found in blockstore", cid))?;
+        // Walks over tipset and historical data, sending all blocks visited into the
+        // car writer.
+        Self::walk_snapshot(tipset, recent_roots, |cid| {
+            let tx_clone = tx.clone();
+            async move {
+                let block = self
+                    .blockstore()
+                    .get(&cid)?
+                    .ok_or_else(|| Error::Other(format!("Cid {cid} not found in blockstore")))?;
 
-            // * If cb can return a generic type, deserializing would remove need to clone.
-            // Ignore error intentionally, if receiver dropped, error will be handled below
-            let _ = task::block_on(tx.send((cid, block.clone())));
-            Ok(block)
+                // Don't include identity CIDs.
+                // We only include raw and dagcbor, for now.
+                // Raw for "code" CIDs.
+                if u64::from(Code::Identity) != cid.hash().code()
+                    && (cid.codec() == fvm_shared::IPLD_RAW
+                        || cid.codec() == fvm_ipld_encoding::DAG_CBOR)
+                {
+                    tx_clone.send_async((cid, block.clone())).await?;
+                }
+                Ok(block)
+            }
         })
         .await?;
 
-        // Drop sender, to close the channel to write task, which will end when finished writing
+        // Drop sender, to close the channel to write task, which will end when finished
+        // writing
         drop(tx);
 
         // Await on values being written.
         write_task
             .await
-            .map_err(|e| Error::Other(format!("Failed to write blocks in export: {}", e)))?;
+            .map_err(|e| Error::Other(format!("Failed to write blocks in export: {e}")))??;
 
-        let time = SystemTime::now()
-            .duration_since(global_pre_time)
-            .expect("time cannot go backwards");
-        info!("export finished, took {} seconds", time.as_secs());
-
-        Ok(())
-    }
-
-    /// Subscribes to head changes. This function will send the current tipset through a channel,
-    /// start a task that listens to each head change event and forwards into the channel,
-    /// then returns an id corresponding to the receiver of this channel from the function.
-    /// This function is not blocking on events, and does not stall publishing events as it will
-    /// skip over lagged events.
-    pub async fn sub_head_changes(&self) -> i64 {
-        let (tx, rx) = channel::bounded(16);
-        let mut subscriber = self.publisher.subscribe();
-
-        debug!("Reading subscription length");
-        let sub_id = self.subscriptions_count.load() as i64 + 1;
-
-        debug!("Incrementing subscriptions count");
-        self.subscriptions_count.fetch_add(1);
-
-        debug!("Writing subscription receiver");
-        self.subscriptions.insert(sub_id, Some(rx));
-
-        debug!("Subscription ID {} created", sub_id);
-
-        // Send current heaviest tipset into receiver as first event.
-        if let Some(ts) = self.heaviest_tipset().await {
-            debug!("Tipset published");
-            tx.send(HeadChange::Current(ts))
-                .await
-                .expect("Receiver guaranteed to not drop by now")
-        }
-
-        let subscriptions = self.subscriptions.clone();
-        debug!("Spawning subscription task");
-
-        task::spawn(async move {
-            loop {
-                match subscriber.recv().await {
-                    Ok(change) => {
-                        debug!("Received head changes for subscription ID: {}", sub_id);
-                        if tx.send(change).await.is_err() {
-                            // Subscriber dropped, no need to keep task alive
-                            subscriptions.insert(sub_id, None);
-                            break;
-                        }
-                    }
-                    Err(RecvError::Lagged(_)) => {
-                        // Can keep polling, as long as receiver is not dropped
-                        warn!("Subscriber lagged, ignored head change events");
-                    }
-                    // This can only happen if chain store is dropped, but fine to exit silently
-                    // if this ever does happen.
-                    Err(RecvError::Closed) => break,
-                }
-            }
-        });
-
-        debug!("Returning subscription ID {}", sub_id);
-        sub_id
-    }
-
-    pub async fn next_head_change(&self, sub_id: &i64) -> Option<HeadChange> {
-        debug!(
-            "Getting subscription receiver for subscription ID: {}",
-            sub_id
+        info!(
+            "export finished, took {} seconds",
+            global_pre_time
+                .elapsed()
+                .expect("time cannot go backwards")
+                .as_secs()
         );
-        if let Some(sub) = self.subscriptions.get(sub_id) {
-            if let Some(rx) = sub.val() {
-                debug!("Polling receiver for subscription ID: {}", sub_id);
-                match rx.recv().await {
-                    Ok(head_change) => {
-                        debug!("Got head change for subscription ID: {}", sub_id);
-                        Some(head_change)
-                    }
-                    Err(_) => None,
-                }
-            } else {
-                warn!("A subscription with this ID no longer exists");
-                None
-            }
-        } else {
-            warn!("No subscription with this ID");
-            None
-        }
+
+        let digest = writer.lock().await.get_mut().finalize();
+        Ok(digest)
     }
 
     /// Walks over tipset and state data and loads all blocks not yet seen.
     /// This is tracked based on the callback function loading blocks.
-    async fn walk_snapshot<F>(
+    pub async fn walk_snapshot<F, T>(
         tipset: &Tipset,
         recent_roots: ChainEpoch,
-        skip_old_msgs: bool,
         mut load_block: F,
     ) -> Result<(), Error>
     where
-        F: FnMut(Cid) -> Result<Vec<u8>, Box<dyn StdError>>,
+        F: FnMut(Cid) -> T + Send,
+        T: Future<Output = Result<Vec<u8>, anyhow::Error>> + Send,
     {
-        let mut seen = HashSet::<Cid>::new();
+        let mut seen = CidHashSet::default();
         let mut blocks_to_walk: VecDeque<Cid> = tipset.cids().to_vec().into();
         let mut current_min_height = tipset.epoch();
         let incl_roots_epoch = tipset.epoch() - recent_roots;
 
         while let Some(next) = blocks_to_walk.pop_front() {
-            if !seen.insert(next) {
+            if !seen.insert(&next) {
                 continue;
             }
 
-            let data = load_block(next)?;
+            let data = load_block(next).await?;
 
             let h = BlockHeader::unmarshal_cbor(&data)?;
 
             if current_min_height > h.epoch() {
                 current_min_height = h.epoch();
+                if current_min_height % EPOCHS_IN_DAY == 0 {
+                    info!(target: "chain_api", "export at: {}", current_min_height);
+                }
             }
 
-            if !skip_old_msgs || h.epoch() > incl_roots_epoch {
-                recurse_links(&mut seen, *h.messages(), &mut load_block)?;
+            if h.epoch() > incl_roots_epoch {
+                recurse_links_hash(&mut seen, *h.messages(), &mut load_block).await?;
             }
 
             if h.epoch() > 0 {
@@ -608,30 +646,34 @@ where
                 }
             } else {
                 for p in h.parents().cids() {
-                    load_block(*p)?;
+                    load_block(*p).await?;
                 }
             }
 
             if h.epoch() == 0 || h.epoch() > incl_roots_epoch {
-                recurse_links(&mut seen, *h.state_root(), &mut load_block)?;
+                recurse_links_hash(&mut seen, *h.state_root(), &mut load_block).await?;
             }
         }
+
         Ok(())
     }
 }
 
-pub(crate) type TipsetCache = RwLock<LruCache<TipsetKeys, Arc<Tipset>>>;
+pub(crate) type TipsetCache = Mutex<LruCache<TipsetKeys, Arc<Tipset>>>;
 
 /// Loads a tipset from memory given the tipset keys and cache.
-pub(crate) async fn tipset_from_keys<BS>(
+pub(crate) fn tipset_from_keys<BS>(
     cache: &TipsetCache,
     store: &BS,
     tsk: &TipsetKeys,
 ) -> Result<Arc<Tipset>, Error>
 where
-    BS: BlockStore + Send + Sync + 'static,
+    BS: Blockstore,
 {
-    if let Some(ts) = cache.write().await.get(tsk) {
+    if let Some(ts) = cache.lock().get(tsk) {
+        metrics::LRU_CACHE_HIT
+            .with_label_values(&[metrics::values::TIPSET])
+            .inc();
         return Ok(ts.clone());
     }
 
@@ -640,7 +682,7 @@ where
         .iter()
         .map(|c| {
             store
-                .get(c)
+                .get_obj(c)
                 .map_err(|e| Error::Other(e.to_string()))?
                 .ok_or_else(|| Error::NotFound(String::from("Key for header")))
         })
@@ -648,11 +690,14 @@ where
 
     // construct new Tipset to return
     let ts = Arc::new(Tipset::new(block_headers)?);
-    cache.write().await.put(tsk.clone(), ts.clone());
+    cache.lock().put(tsk.clone(), ts.clone());
+    metrics::LRU_CACHE_MISS
+        .with_label_values(&[metrics::values::TIPSET])
+        .inc();
     Ok(ts)
 }
 
-/// Helper to ensure consistent Cid -> db key translation.
+/// Helper to ensure consistent CID to db key translation.
 fn block_validation_key(cid: &Cid) -> Vec<u8> {
     let mut key = Vec::new();
     key.extend_from_slice(BLOCK_VAL_PREFIX);
@@ -660,46 +705,46 @@ fn block_validation_key(cid: &Cid) -> Vec<u8> {
     key
 }
 
-/// Returns a Tuple of bls messages of type UnsignedMessage and secp messages
-/// of type SignedMessage
+/// Returns a Tuple of BLS messages of type `UnsignedMessage` and SECP messages
+/// of type `SignedMessage`
 pub fn block_messages<DB>(
     db: &DB,
     bh: &BlockHeader,
-) -> Result<(Vec<UnsignedMessage>, Vec<SignedMessage>), Error>
+) -> Result<(Vec<Message>, Vec<SignedMessage>), Error>
 where
-    DB: BlockStore,
+    DB: Blockstore,
 {
     let (bls_cids, secpk_cids) = read_msg_cids(db, bh.messages())?;
 
-    let bls_msgs: Vec<UnsignedMessage> = messages_from_cids(db, &bls_cids)?;
+    let bls_msgs: Vec<Message> = messages_from_cids(db, &bls_cids)?;
     let secp_msgs: Vec<SignedMessage> = messages_from_cids(db, &secpk_cids)?;
 
     Ok((bls_msgs, secp_msgs))
 }
 
-/// Returns a tuple of UnsignedMessage and SignedMessages from their Cid
+/// Returns a tuple of `UnsignedMessage` and `SignedMessages` from their CID
 pub fn block_messages_from_cids<DB>(
     db: &DB,
     bls_cids: &[Cid],
     secp_cids: &[Cid],
-) -> Result<(Vec<UnsignedMessage>, Vec<SignedMessage>), Error>
+) -> Result<(Vec<Message>, Vec<SignedMessage>), Error>
 where
-    DB: BlockStore,
+    DB: Blockstore,
 {
-    let bls_msgs: Vec<UnsignedMessage> = messages_from_cids(db, bls_cids)?;
+    let bls_msgs: Vec<Message> = messages_from_cids(db, bls_cids)?;
     let secp_msgs: Vec<SignedMessage> = messages_from_cids(db, secp_cids)?;
 
     Ok((bls_msgs, secp_msgs))
 }
 
-/// Returns a tuple of cids for both Unsigned and Signed messages
+/// Returns a tuple of CIDs for both unsigned and signed messages
 // TODO cache these recent meta roots
 pub fn read_msg_cids<DB>(db: &DB, msg_cid: &Cid) -> Result<(Vec<Cid>, Vec<Cid>), Error>
 where
-    DB: BlockStore,
+    DB: Blockstore,
 {
     if let Some(roots) = db
-        .get::<TxMeta>(msg_cid)
+        .get_obj::<TxMeta>(msg_cid)
         .map_err(|e| Error::Other(e.to_string()))?
     {
         let bls_cids = read_amt_cids(db, &roots.bls_message_root)?;
@@ -707,28 +752,15 @@ where
         Ok((bls_cids, secpk_cids))
     } else {
         Err(Error::UndefinedKey(format!(
-            "no msg root with cid {}",
-            msg_cid
+            "no msg root with cid {msg_cid}"
         )))
     }
 }
 
-/// Sets the genesis key in the BlockStore. Be careful if using this outside of
-/// the ChainStore as it will not update what the ChainStore thinks is the genesis
-/// after the ChainStore has been created.
-pub fn set_genesis<DB>(db: &DB, header: &BlockHeader) -> Result<Cid, Error>
-where
-    DB: BlockStore,
-{
-    db.write(GENESIS_KEY, header.marshal_cbor()?)?;
-    db.put(&header, Blake2b256)
-        .map_err(|e| Error::Other(e.to_string()))
-}
-
-/// Persists slice of serializable objects to blockstore.
+/// Persists slice of `serializable` objects to `blockstore`.
 pub fn persist_objects<DB, C>(db: &DB, headers: &[C]) -> Result<(), Error>
 where
-    DB: BlockStore,
+    DB: Blockstore,
     C: Serialize,
 {
     for chunk in headers.chunks(256) {
@@ -738,10 +770,10 @@ where
     Ok(())
 }
 
-/// Returns a vector of cids from provided root cid
+/// Returns a vector of CIDs from provided root CID
 fn read_amt_cids<DB>(db: &DB, root: &Cid) -> Result<Vec<Cid>, Error>
 where
-    DB: BlockStore,
+    DB: Blockstore,
 {
     let amt = Amt::<Cid, _>::load(root, db)?;
 
@@ -755,24 +787,13 @@ where
     Ok(cids)
 }
 
-/// Returns the genesis block from storage.
-pub fn genesis<DB>(db: &DB) -> Result<Option<BlockHeader>, Error>
-where
-    DB: BlockStore,
-{
-    Ok(db
-        .read(GENESIS_KEY)?
-        .map(|bz| BlockHeader::unmarshal_cbor(&bz))
-        .transpose()?)
-}
-
-/// Attempts to deserialize to unsigend message or signed message and then returns it at as a
-// [ChainMessage].
+/// Attempts to de-serialize to unsigned message or signed message and then
+/// returns it as a [`ChainMessage`].
 pub fn get_chain_message<DB>(db: &DB, key: &Cid) -> Result<ChainMessage, Error>
 where
-    DB: BlockStore,
+    DB: Blockstore,
 {
-    db.get(key)
+    db.get_obj(key)
         .map_err(|e| Error::Other(e.to_string()))?
         .ok_or_else(|| Error::UndefinedKey(key.to_string()))
 }
@@ -780,10 +801,10 @@ where
 /// Given a tipset this function will return all unique messages in that tipset.
 pub fn messages_for_tipset<DB>(db: &DB, ts: &Tipset) -> Result<Vec<ChainMessage>, Error>
 where
-    DB: BlockStore,
+    DB: Blockstore,
 {
     let mut applied: HashMap<Address, u64> = HashMap::new();
-    let mut balances: HashMap<Address, BigInt> = HashMap::new();
+    let mut balances: HashMap<Address, TokenAmount> = HashMap::new();
     let state =
         StateTree::new_from_root(db, ts.parent_state()).map_err(|e| Error::Other(e.to_string()))?;
 
@@ -795,14 +816,14 @@ where
         let signed_box = signed.into_iter().map(ChainMessage::Signed);
 
         for message in unsigned_box.chain(signed_box) {
-            let from_address = message.from();
+            let from_address = &message.from();
             if applied.contains_key(from_address) {
                 let actor_state = state
                     .get_actor(from_address)
                     .map_err(|e| Error::Other(e.to_string()))?
                     .ok_or_else(|| Error::Other("Actor state not found".to_string()))?;
                 applied.insert(*from_address, actor_state.sequence);
-                balances.insert(*from_address, actor_state.balance);
+                balances.insert(*from_address, actor_state.balance.clone().into());
             }
             if let Some(seq) = applied.get_mut(from_address) {
                 if *seq != message.sequence() {
@@ -835,85 +856,40 @@ where
     })
 }
 
-/// Returns messages from key-value store based on a slice of [Cid]s.
+/// Returns messages from key-value store based on a slice of [`Cid`]s.
 pub fn messages_from_cids<DB, T>(db: &DB, keys: &[Cid]) -> Result<Vec<T>, Error>
 where
-    DB: BlockStore,
+    DB: Blockstore,
     T: DeserializeOwned,
 {
     keys.iter()
         .map(|k| {
-            db.get(k)
+            db.get_obj(k)
                 .map_err(|e| Error::Other(e.to_string()))?
                 .ok_or_else(|| Error::UndefinedKey(k.to_string()))
         })
         .collect()
 }
 
-/// Returns parent message receipt given block_header and message index.
+/// Returns parent message receipt given `block_header` and message index.
 pub fn get_parent_reciept<DB>(
     db: &DB,
     block_header: &BlockHeader,
     i: usize,
-) -> Result<Option<MessageReceipt>, Error>
+) -> Result<Option<Receipt>, Error>
 where
-    DB: BlockStore,
+    DB: Blockstore,
 {
     let amt = Amt::load(block_header.message_receipts(), db)?;
     let receipts = amt.get(i as u64)?;
     Ok(receipts.cloned())
 }
 
-/// Returns the weight of provided [Tipset]. This function will load power actor state
-/// and calculate the total weight of the [Tipset].
-pub fn weight<DB>(db: &DB, ts: &Tipset) -> Result<BigInt, String>
-where
-    DB: BlockStore,
-{
-    let state = StateTree::new_from_root(db, ts.parent_state()).map_err(|e| e.to_string())?;
-
-    let act = state
-        .get_actor(power::ADDRESS)
-        .map_err(|e| e.to_string())?
-        .ok_or("Failed to load power actor for calculating weight")?;
-
-    let state = power::State::load(db, &act).map_err(|e| e.to_string())?;
-
-    let tpow = state.into_total_quality_adj_power();
-
-    let log2_p = if tpow > BigInt::zero() {
-        BigInt::from(tpow.bits() - 1)
-    } else {
-        return Err(
-            "All power in the net is gone. You network might be disconnected, or the net is dead!"
-                .to_owned(),
-        );
-    };
-
-    let mut total_j = 0;
-    for b in ts.blocks() {
-        total_j += b
-            .election_proof()
-            .as_ref()
-            .ok_or("Block contained no election proof when calculating weight")?
-            .win_count;
-    }
-
-    let mut out = ts.weight().to_owned();
-    out += &log2_p << 8;
-    let mut e_weight: BigInt = log2_p * W_RATIO_NUM;
-    e_weight <<= 8;
-    e_weight *= total_j;
-    e_weight = e_weight.div_floor(&(BigInt::from(BLOCKS_PER_EPOCH * W_RATIO_DEN)));
-    out += &e_weight;
-    Ok(out)
-}
-
-#[cfg(feature = "json")]
 pub mod headchange_json {
-    use super::*;
-    use blocks::tipset_json::TipsetJson;
+    use forest_blocks::tipset_json::TipsetJson;
     use serde::{Deserialize, Serialize};
+
+    use super::*;
 
     #[derive(Debug, Deserialize, Serialize)]
     #[serde(rename_all = "lowercase")]
@@ -937,43 +913,129 @@ pub mod headchange_json {
     }
 }
 
+/// Result of persisting a vector of `SignedMessage`s that are to be included in
+/// a block.
+///
+/// The fields are public so they can be partially moved, but they should not be
+/// modified.
+pub struct PersistedBlockMessages {
+    /// Overall CID to be included in the `BlockHeader`.
+    pub msg_cid: Cid,
+    /// All CIDs of SECP messages, to be included in `BlockMsg`.
+    pub secp_cids: Vec<Cid>,
+    /// All CIDs of BLS messages, to be included in `BlockMsg`.
+    pub bls_cids: Vec<Cid>,
+    /// Aggregated signature of all BLS messages, to be included in the
+    /// `BlockHeader`.
+    pub bls_agg: Signature,
+}
+
+/// Partition the messages into SECP and BLS variants, store them individually
+/// in the IPLD store, and the corresponding `TxMeta` as well, returning its CID
+/// so that it can be put in a block header. Also return the aggregated BLS
+/// signature of all BLS messages.
+pub fn persist_block_messages<DB: Blockstore>(
+    db: &DB,
+    messages: Vec<&SignedMessage>,
+) -> anyhow::Result<PersistedBlockMessages> {
+    let mut bls_cids = Vec::new();
+    let mut secp_cids = Vec::new();
+
+    let mut bls_sigs = Vec::new();
+    for msg in messages {
+        if msg.signature().signature_type() == SignatureType::BLS {
+            let c = db.put_obj(&msg.message, Blake2b256)?;
+            bls_cids.push(c);
+            bls_sigs.push(&msg.signature);
+        } else {
+            let c = db.put_obj(&msg, Blake2b256)?;
+            secp_cids.push(c);
+        }
+    }
+
+    let bls_msg_root = Amt::new_from_iter(db, bls_cids.iter().copied())?;
+    let secp_msg_root = Amt::new_from_iter(db, secp_cids.iter().copied())?;
+
+    let mmcid = db.put_obj(
+        &TxMeta {
+            bls_message_root: bls_msg_root,
+            secp_message_root: secp_msg_root,
+        },
+        Blake2b256,
+    )?;
+
+    let bls_agg = if bls_sigs.is_empty() {
+        Signature::new_bls(vec![])
+    } else {
+        Signature::new_bls(
+            bls_signatures::aggregate(
+                &bls_sigs
+                    .iter()
+                    .map(|s| s.bytes())
+                    .map(bls_signatures::Signature::from_bytes)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+            .unwrap()
+            .as_bytes(),
+        )
+    };
+
+    Ok(PersistedBlockMessages {
+        msg_cid: mmcid,
+        secp_cids,
+        bls_cids,
+        bls_agg,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use cid::{
+        multihash::{
+            Code::{Blake2b256, Identity},
+            MultihashDigest,
+        },
+        Cid,
+    };
+    use forest_shim::address::Address;
+    use fvm_ipld_encoding::DAG_CBOR;
+
     use super::*;
-    use address::Address;
-    use async_std::sync::Arc;
-    use cid::Code::{Blake2b256, Identity};
 
     #[test]
     fn genesis_test() {
-        let db = db::MemoryDB::default();
+        let db = forest_db::MemoryDB::default();
+        let chain_config = Arc::new(ChainConfig::default());
 
-        let cs = ChainStore::new(Arc::new(db));
         let gen_block = BlockHeader::builder()
             .epoch(1)
             .weight(2_u32.into())
-            .messages(cid::new_from_cbor(&[], Identity))
-            .message_receipts(cid::new_from_cbor(&[], Identity))
-            .state_root(cid::new_from_cbor(&[], Identity))
+            .messages(Cid::new_v1(DAG_CBOR, Identity.digest(&[])))
+            .message_receipts(Cid::new_v1(DAG_CBOR, Identity.digest(&[])))
+            .state_root(Cid::new_v1(DAG_CBOR, Identity.digest(&[])))
             .miner_address(Address::new_id(0))
             .build()
             .unwrap();
+        let cs = ChainStore::new(db, chain_config, &gen_block).unwrap();
 
-        assert_eq!(cs.genesis().unwrap(), None);
-        cs.set_genesis(&gen_block).unwrap();
-        assert_eq!(cs.genesis().unwrap(), Some(gen_block));
+        assert_eq!(cs.genesis().unwrap(), gen_block);
     }
 
     #[test]
     fn block_validation_cache_basic() {
-        let db = db::MemoryDB::default();
+        let db = forest_db::MemoryDB::default();
+        let chain_config = Arc::new(ChainConfig::default());
+        let gen_block = BlockHeader::builder()
+            .miner_address(Address::new_id(0))
+            .build()
+            .unwrap();
 
-        let cs = ChainStore::new(Arc::new(db));
+        let cs = ChainStore::new(db, chain_config, &gen_block).unwrap();
 
-        let cid = cid::new_from_cbor(&[1, 2, 3], Blake2b256);
-        assert_eq!(cs.is_block_validated(&cid).unwrap(), false);
+        let cid = Cid::new_v1(DAG_CBOR, Blake2b256.digest(&[1, 2, 3]));
+        assert!(!cs.is_block_validated(&cid).unwrap());
 
         cs.mark_block_as_validated(&cid).unwrap();
-        assert_eq!(cs.is_block_validated(&cid).unwrap(), true);
+        assert!(cs.is_block_validated(&cid).unwrap());
     }
 }

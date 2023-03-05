@@ -1,19 +1,23 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-#![cfg(feature = "submodule_tests")]
+use std::{
+    fs::File,
+    io::BufReader,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
-use cid::{Cid, Code::Blake2b256};
-use db::MemoryDB;
-use forest_ipld::json::{self, IpldJson};
-use forest_ipld::selector::{LastBlockInfo, LinkResolver, Selector, VisitReason};
-use forest_ipld::{Ipld, Path};
-use ipld_blockstore::BlockStore;
+use cid::{multihash::Code::Blake2b256, Cid};
+use forest_db::MemoryDB;
+use forest_ipld::{
+    json::{self, IpldJson},
+    selector::{LastBlockInfo, LinkResolver, Selector, VisitReason},
+};
+use forest_utils::db::BlockstoreExt;
+use libipld::Path;
+use libipld_core::ipld::Ipld;
 use serde::Deserialize;
-use std::fs::File;
-use std::io::BufReader;
-use std::sync::{Arc, Mutex};
 
 /// Type to ignore the specifics of a list or map for JSON tests
 #[derive(Deserialize, Debug, Clone)]
@@ -34,7 +38,7 @@ enum IpldValue {
     List,
     #[serde(rename = "map")]
     Map,
-    #[serde(rename = "link", with = "cid::json")]
+    #[serde(rename = "link", with = "forest_json::cid")]
     Link(Cid),
 }
 
@@ -49,8 +53,9 @@ struct ExpectVisit {
 }
 
 mod path_json {
-    use super::Path;
     use serde::{Deserialize, Deserializer};
+
+    use super::Path;
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Path, D::Error>
     where
@@ -62,10 +67,10 @@ mod path_json {
 }
 
 mod last_block_json {
-    use super::LastBlockInfo;
-    use super::Path;
     use cid::Cid;
     use serde::{Deserialize, Deserializer};
+
+    use super::{LastBlockInfo, Path};
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<LastBlockInfo>, D::Error>
     where
@@ -75,7 +80,7 @@ mod last_block_json {
         struct LastBlockDe {
             #[serde(with = "super::path_json")]
             path: Path,
-            #[serde(with = "cid::json")]
+            #[serde(with = "forest_json::cid")]
             link: Cid,
         }
         match Deserialize::deserialize(deserializer)? {
@@ -101,22 +106,21 @@ fn check_ipld(ipld: &Ipld, value: &IpldValue) -> bool {
         (&Ipld::Map(_), &Map) => true,
         (&Ipld::List(_), &List) => true,
         (&Ipld::Null, &Null) => true,
-        (&Ipld::Bool(ref a), &Bool(ref b)) => a == b,
-        (&Ipld::Integer(ref a), &Integer(ref b)) => a == b,
-        (&Ipld::Float(ref a), &Float(ref b)) => a == b,
-        (&Ipld::String(ref a), &String(ref b)) => a == b,
-        (&Ipld::Bytes(ref a), &Bytes(ref b)) => a == b,
-        (&Ipld::Link(ref a), &Link(ref b)) => a == b,
+        (Ipld::Bool(a), Bool(b)) => a == b,
+        (Ipld::Integer(a), Integer(b)) => a == b,
+        (Ipld::Float(a), Float(b)) => a == b,
+        (Ipld::String(a), String(b)) => a == b,
+        (Ipld::Bytes(a), Bytes(b)) => a == b,
+        (Ipld::Link(a), Link(b)) => a == b,
         _ => false,
     }
 }
 
 fn check_matched(reason: VisitReason, matched: bool) -> bool {
-    match (reason, matched) {
-        (VisitReason::SelectionMatch, true) => true,
-        (VisitReason::SelectionCandidate, false) => true,
-        _ => false,
-    }
+    matches!(
+        (reason, matched),
+        (VisitReason::SelectionMatch, true) | (VisitReason::SelectionCandidate, false)
+    )
 }
 
 #[derive(Clone)]
@@ -125,7 +129,7 @@ struct TestLinkResolver(MemoryDB);
 #[async_trait]
 impl LinkResolver for TestLinkResolver {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
-        self.0.get(link).map_err(|e| e.to_string())
+        self.0.get_obj(link).map_err(|e| e.to_string())
     }
 }
 
@@ -134,32 +138,32 @@ async fn process_vector(tv: TestVector) -> Result<(), String> {
     let resolver = tv.cbor_ipld_storage.map(|ipld_storage| {
         let storage = MemoryDB::default();
         for IpldJson(i) in ipld_storage {
-            storage.put(&i, Blake2b256).unwrap();
+            storage.put_obj(&i, Blake2b256).unwrap();
         }
         TestLinkResolver(storage)
     });
 
     // Index to ensure that the callback can check against the expectations
-    let index = Arc::new(Mutex::new(0));
+    let index = AtomicUsize::new(0);
     let expect = tv.expect_visit.clone();
     let description = tv
         .description
         .clone()
-        .unwrap_or("unnamed test case".to_owned());
+        .unwrap_or_else(|| "unnamed test case".to_owned());
 
     tv.selector
         .walk_all(
             &tv.ipld,
             resolver,
             |prog, ipld, reason| -> Result<(), String> {
-                let mut idx = index.lock().unwrap();
-                let exp = &expect[*idx];
+                let idx = index.load(Ordering::Relaxed);
+                let exp = &expect[idx];
                 // Current path
                 if prog.path() != &exp.path {
                     return Err(format!(
                         "{:?} at (idx: {}) does not match {:?}",
                         prog.path(),
-                        *idx,
+                        idx,
                         exp.path
                     ));
                 }
@@ -167,14 +171,14 @@ async fn process_vector(tv: TestVector) -> Result<(), String> {
                 if !check_ipld(ipld, &exp.node) {
                     return Err(format!(
                         "{:?} at (idx: {}) does not match {:?}",
-                        ipld, *idx, exp.node
+                        ipld, idx, exp.node
                     ));
                 }
                 // Match boolean against visit reason
                 if !check_matched(reason, exp.matched) {
                     return Err(format!(
                         "{:?} at (idx: {}) does not match {:?}",
-                        reason, *idx, exp.matched
+                        reason, idx, exp.matched
                     ));
                 }
                 // Check last block information
@@ -182,19 +186,19 @@ async fn process_vector(tv: TestVector) -> Result<(), String> {
                     return Err(format!(
                         "{:?} at (idx: {}) does not match {:?}",
                         prog.last_block(),
-                        *idx,
+                        idx,
                         exp.last_block
                     ));
                 }
-                *idx += 1;
+                index.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             },
         )
         .await
-        .map_err(|e| format!("({}) failed, reason: {}", description, e.to_string()))?;
+        .map_err(|e| format!("({description}) failed, reason: {e}"))?;
 
     // Ensure all expected traversals were checked
-    let current_idx = *index.lock().unwrap();
+    let current_idx = index.into_inner();
     if expect.len() != current_idx {
         Err(format!(
             "{}: Did not traverse all expected nodes (expected: {}) (current: {})",
@@ -219,14 +223,14 @@ async fn process_file(file: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn selector_explore_tests() {
     process_file("./tests/ipld-traversal-vectors/selector_walk.json")
         .await
         .unwrap();
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn selector_explore_links_tests() {
     process_file("./tests/ipld-traversal-vectors/selector_walk_links.json")
         .await

@@ -1,47 +1,50 @@
 [package]
-name = "state_manager"
-version = "0.1.0"
-authors = ["ChainSafe Systems <info@chainsafe.io>"]
-edition = "2018"
-
-[package.metadata.docs.rs]
-features = ["statediff"]
+name = "forest_state_manager"
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
 
 [dependencies]
-address = { package = "forest_address", version = "0.3" }
-actor = { package = "actor_interface", path = "../../vm/actor_interface" }
-blake2b_simd = "0.5.9"
-byteorder = "1.3.4"
-cid = { package = "forest_cid", version = "0.3" }
-db = { package = "forest_db", version = "0.1" }
-encoding = { package = "forest_encoding", version = "0.2.1" }
-num-bigint = { path = "../../utils/bigint", package = "forest_bigint" }
-state_tree = { path = "../../vm/state_tree/" }
-blockstore = { package = "ipld_blockstore", version = "0.1", features = [
-    "buffered"
-] }
-forest_blocks = { path = "../../blockchain/blocks" }
-beacon = { path = "../../blockchain/beacon" }
-thiserror = "1.0"
-interpreter = { path = "../../vm/interpreter/" }
-ipld_amt = "0.2"
-clock = { package = "fil_clock", path = "../../node/clock" }
-chain = { path = "../chain" }
-async-std = { version = "1.9", features = ["unstable", "tokio1"] }
-async-log = "2.0.0"
-log = "0.4.8"
-fil_types = "0.2"
-message = { package = "forest_message", version = "0.7", features = ["json", "blst"] }
-vm = { package = "forest_vm", version = "0.3.1" }
-bitfield = { package = "forest_bitfield", version = "0.1" }
-serde = { version = "1.0", features = ["derive"] }
-num-traits = "0.2.11"
-tokio = { version = "1.0", features = ["sync"] }
-filecoin-proofs-api = { version = "9", features = ["blst"], default_features = false }
-futures = "0.3.5"
-runtime = { package = "forest_runtime", version = "0.2" }
-lazy_static = "1.4"
-once_cell = "1.5"
-forest_crypto = { version = "0.5", features = ["blst"] }
-networks = { path = "../../types/networks" }
-statediff = { path = "../../utils/statediff", optional = true }
+ahash.workspace = true
+anyhow.workspace = true
+blake2b_simd.workspace = true
+byteorder.workspace = true
+cid.workspace = true
+fil_actors_runtime_v9.workspace = true
+forest_actor_interface.workspace = true
+forest_beacon.workspace = true
+forest_blocks.workspace = true
+forest_chain.workspace = true
+forest_db.workspace = true
+forest_encoding.workspace = true
+forest_fil_types.workspace = true
+forest_interpreter.workspace = true
+forest_json.workspace = true
+forest_message = { workspace = true, features = ["blst"] }
+forest_metrics.workspace = true
+forest_networks.workspace = true
+forest_shim.workspace = true
+forest_utils.workspace = true
+futures.workspace = true
+fvm.workspace = true
+fvm3.workspace = true
+fvm_ipld_amt.workspace = true
+fvm_ipld_bitfield.workspace = true
+fvm_ipld_blockstore.workspace = true
+fvm_ipld_encoding.workspace = true
+fvm_shared = { workspace = true, default-features = false }
+lazy_static.workspace = true
+lru.workspace = true
+num-traits.workspace = true
+num.workspace = true
+parking_lot.workspace = true
+prometheus.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+[features]
+default = []

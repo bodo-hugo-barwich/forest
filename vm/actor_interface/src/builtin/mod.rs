@@ -1,4 +1,4 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 pub mod account;
@@ -11,135 +11,69 @@ pub mod power;
 pub mod reward;
 pub mod system;
 
-use crate::ActorVersion;
-
 use cid::Cid;
-use num_bigint::BigInt;
+pub use fil_actor_reward_v8::AwardBlockRewardParams;
+use fil_actors_runtime_v9::builtin::network;
+pub use fil_actors_runtime_v9::builtin::singletons::{BURNT_FUNDS_ACTOR_ADDR, CHAOS_ACTOR_ADDR};
+use fvm_shared::address::Address;
+pub use fvm_shared::{clock::EPOCH_DURATION_SECONDS, smooth::FilterEstimate};
+pub const EPOCHS_IN_DAY: fvm_shared::clock::ChainEpoch = network::EPOCHS_IN_DAY;
 
-pub const EPOCH_DURATION_SECONDS: clock::ChainEpoch = actorv0::EPOCH_DURATION_SECONDS;
-pub const EPOCHS_IN_DAY: clock::ChainEpoch = actorv0::EPOCHS_IN_DAY;
+pub const RESERVE_ADDRESS: Address = Address::new_id(90);
 
-// Aliases for common addresses
-pub static CHAOS_ACTOR_ADDR: &actorv0::CHAOS_ACTOR_ADDR = &actorv0::CHAOS_ACTOR_ADDR;
-pub static BURNT_FUNDS_ACTOR_ADDR: &actorv0::BURNT_FUNDS_ACTOR_ADDR =
-    &actorv0::BURNT_FUNDS_ACTOR_ADDR;
-pub static RESERVE_ADDRESS: &actorv0::RESERVE_ADDRESS = &actorv0::RESERVE_ADDRESS;
-
-/// Returns true if the code belongs to a builtin actor.
-pub fn is_builtin_actor(code: &Cid) -> bool {
-    actorv0::is_builtin_actor(code)
-        || actorv2::is_builtin_actor(code)
-        || actorv3::is_builtin_actor(code)
-        || actorv4::is_builtin_actor(code)
-        || actorv5::is_builtin_actor(code)
-        || actorv6::is_builtin_actor(code)
+#[macro_export]
+macro_rules! load_actor_state {
+    ($store:expr, $actor:expr, $id:ident) => {
+        if $actor.code == *actorv6::$id {
+            use anyhow::Context;
+            $store
+                .get_obj(&$actor.state)?
+                .context("Actor state doesn't exist in store")
+                .map(State::V6)
+        } else if $actor.code == *actorv5::$id {
+            use anyhow::Context;
+            $store
+                .get_obj(&$actor.state)?
+                .context("Actor state doesn't exist in store")
+                .map(State::V5)
+        } else if $actor.code == *actorv4::$id {
+            use anyhow::Context;
+            $store
+                .get_obj(&$actor.state)?
+                .context("Actor state doesn't exist in store")
+                .map(State::V4)
+        } else if $actor.code == *actorv3::$id {
+            use anyhow::Context;
+            $store
+                .get_obj(&$actor.state)?
+                .context("Actor state doesn't exist in store")
+                .map(State::V3)
+        } else if $actor.code == *actorv2::$id {
+            use anyhow::Context;
+            $store
+                .get_obj(&$actor.state)?
+                .context("Actor state doesn't exist in store")
+                .map(State::V2)
+        } else if $actor.code == *actorv0::$id {
+            use anyhow::Context;
+            $store
+                .get_obj(&$actor.state)?
+                .context("Actor state doesn't exist in store")
+                .map(State::V0)
+        } else {
+            Err(anyhow::anyhow!("Unknown actor code {}", $actor.code))
+        }
+    };
 }
 
 /// Returns true if the code belongs to an account actor.
 pub fn is_account_actor(code: &Cid) -> bool {
-    actorv0::is_account_actor(code)
-        || actorv2::is_account_actor(code)
-        || actorv3::is_account_actor(code)
-        || actorv4::is_account_actor(code)
-        || actorv5::is_account_actor(code)
-        || actorv6::is_account_actor(code)
-}
-
-/// Returns true if the code belongs to a singleton actor.
-pub fn is_singleton_actor(code: &Cid) -> bool {
-    actorv0::is_singleton_actor(code)
-        || actorv2::is_singleton_actor(code)
-        || actorv3::is_singleton_actor(code)
-        || actorv4::is_singleton_actor(code)
-        || actorv5::is_singleton_actor(code)
-        || actorv6::is_singleton_actor(code)
+    account::is_v8_account_cid(code)
+        || account::is_v9_account_cid(code)
+        || account::is_v10_account_cid(code)
 }
 
 /// Returns true if the code belongs to a miner actor.
-pub fn is_miner_actor(code: &Cid) -> bool {
-    code == &*actorv0::MINER_ACTOR_CODE_ID
-        || code == &*actorv2::MINER_ACTOR_CODE_ID
-        || code == &*actorv3::MINER_ACTOR_CODE_ID
-        || code == &*actorv4::MINER_ACTOR_CODE_ID
-        || code == &*actorv5::MINER_ACTOR_CODE_ID
-        || code == &*actorv6::MINER_ACTOR_CODE_ID
-}
-
-/// Returns an actor's version or None if it was not a builtin
-pub fn actor_version(code: &Cid) -> Option<ActorVersion> {
-    if actorv6::is_builtin_actor(code) {
-        Some(ActorVersion::V6)
-    } else if actorv5::is_builtin_actor(code) {
-        Some(ActorVersion::V5)
-    } else if actorv4::is_builtin_actor(code) {
-        Some(ActorVersion::V4)
-    } else if actorv3::is_builtin_actor(code) {
-        Some(ActorVersion::V3)
-    } else if actorv2::is_builtin_actor(code) {
-        Some(ActorVersion::V2)
-    } else if actorv0::is_builtin_actor(code) {
-        Some(ActorVersion::V0)
-    } else {
-        None
-    }
-}
-
-#[derive(Default, Clone, Debug, PartialEq)]
-pub struct FilterEstimate {
-    pub position: BigInt,
-    pub velocity: BigInt,
-}
-
-impl From<actorv0::util::smooth::FilterEstimate> for FilterEstimate {
-    fn from(filter_est: actorv0::util::smooth::FilterEstimate) -> Self {
-        Self {
-            position: filter_est.position,
-            velocity: filter_est.velocity,
-        }
-    }
-}
-
-impl From<actorv2::util::smooth::FilterEstimate> for FilterEstimate {
-    fn from(filter_est: actorv2::util::smooth::FilterEstimate) -> Self {
-        Self {
-            position: filter_est.position,
-            velocity: filter_est.velocity,
-        }
-    }
-}
-
-impl From<actorv3::util::smooth::FilterEstimate> for FilterEstimate {
-    fn from(filter_est: actorv3::util::smooth::FilterEstimate) -> Self {
-        Self {
-            position: filter_est.position,
-            velocity: filter_est.velocity,
-        }
-    }
-}
-
-impl From<actorv4::util::smooth::FilterEstimate> for FilterEstimate {
-    fn from(filter_est: actorv4::util::smooth::FilterEstimate) -> Self {
-        Self {
-            position: filter_est.position,
-            velocity: filter_est.velocity,
-        }
-    }
-}
-
-impl From<actorv5::util::smooth::FilterEstimate> for FilterEstimate {
-    fn from(filter_est: actorv5::util::smooth::FilterEstimate) -> Self {
-        Self {
-            position: filter_est.position,
-            velocity: filter_est.velocity,
-        }
-    }
-}
-
-impl From<actorv6::util::smooth::FilterEstimate> for FilterEstimate {
-    fn from(filter_est: actorv6::util::smooth::FilterEstimate) -> Self {
-        Self {
-            position: filter_est.position,
-            velocity: filter_est.velocity,
-        }
-    }
+pub fn is_miner_actor(_code: &Cid) -> bool {
+    unimplemented!()
 }

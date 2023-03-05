@@ -1,60 +1,61 @@
 [package]
-name = "rpc"
-version = "0.1.0"
-authors = ["ChainSafe Systems <info@chainsafe.io>"]
-edition = "2018"
+name = "forest_rpc"
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
 
 [dependencies]
-# Public
-async-std = { version = "1.9", features = ["attributes"] }
-base64 = "0.13"
-bls-signatures = { version = "0.9", default-features = false, features = ["blst"] }
-crossbeam = "0.8.0"
-futures = "0.3.5"
-hex = "0.4.2"
-log = "0.4.8"
-multibase = "0.9.0"
-num-traits = "0.2.11"
-rand = "0.7"
-rand_distr = "0.3"
-serde = { version = "1.0.101", default-features = false, features = ["derive"] }
-serde_json = "1.0.48"
-tide = "0.16.0"
-tide-websockets = "0.4.0"
-# Internal
-actor = { package = "actor_interface", path = "../../vm/actor_interface" }
-address = { package = "forest_address", version = "0.3", features = ["json"] }
-auth = { path = "../../utils/auth" }
-beacon = { package = "beacon", path = "../../blockchain/beacon", features = ["json"] }
-bitfield = { package = "forest_bitfield", version = "0.1", features = ["json"] }
-blocks = { package = "forest_blocks", path = "../../blockchain/blocks", features = ["json"] }
-blockstore = { package = "ipld_blockstore", version = "0.1" }
-chain = { path = "../../blockchain/chain", features = ["json"] }
-chain_sync = { path = "../../blockchain/chain_sync" }
-cid = { package = "forest_cid", version = "0.3", features = ["json"] }
-crypto = { package = "forest_crypto", version = "0.5", features = ["json", "blst"] }
-encoding = { package = "forest_encoding", version = "0.2.1" }
-fil_types = "0.2"
-forest_libp2p = { path = "../forest_libp2p" }
-interpreter = { path = "../../vm/interpreter/" }
-ipld = { package = "forest_ipld", path = "../../ipld", features = ["json"] }
-ipld_amt = "1.0"
-message = { package = "forest_message", version = "0.7", features = ["json", "blst"] }
-message_pool = { path = "../../blockchain/message_pool" }
-networks = { path = "../../types/networks" }
-num-bigint = { version = "0.1.1", package = "forest_bigint" }
-rpc-api = { path = "../rpc-api", version = "0.1" }
-state_manager = { package = "state_manager", path = "../../blockchain/state_manager" }
-state_tree = { path = "../../vm/state_tree" }
-wallet = { package = "key_management", path = "../../key_management", features = ["json"] }
-
-[dependencies.jsonrpc-v2]
-version = "0.10.1"
-features = ["easy-errors", "macros", "bytes-v05"]
-default-features = false
+ahash.workspace = true
+anyhow.workspace = true
+axum = { workspace = true, features = ["ws"] }
+base64.workspace = true
+cid.workspace = true
+crossbeam = "0.8"
+flume.workspace = true
+forest_actor_interface.workspace = true
+forest_auth.workspace = true
+forest_beacon.workspace = true
+forest_blocks.workspace = true
+forest_chain.workspace = true
+forest_chain_sync.workspace = true
+forest_db.workspace = true
+forest_interpreter.workspace = true
+forest_ipld.workspace = true
+forest_json.workspace = true
+forest_key_management.workspace = true
+forest_libp2p.workspace = true
+forest_message = { workspace = true, features = ["blst"] }
+forest_message_pool.workspace = true
+forest_networks.workspace = true
+forest_rpc-api.workspace = true
+forest_shim.workspace = true
+forest_state_manager.workspace = true
+forest_utils.workspace = true
+futures.workspace = true
+fvm_ipld_blockstore.workspace = true
+fvm_ipld_encoding.workspace = true
+fvm_shared3 = { workspace = true, default-features = false }
+hex.workspace = true
+http.workspace = true
+jsonrpc-v2.workspace = true
+lazy_static.workspace = true
+libipld-core.workspace = true
+log.workspace = true
+multibase.workspace = true
+num-traits.workspace = true
+num.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+rand_distr = "0.4"
+semver = "1.0"
+serde = { workspace = true, default-features = false, features = ["derive"] }
+serde_json.workspace = true
+sha2 = { workspace = true, default-features = false }
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
-db = { package = "forest_db", version = "0.1" }
-futures = "0.3.5"
-hex = "0.4.2"
-test_utils = { version = "0.1.0", path = "../../utils/test_utils/", features = ["test_constructors"] }
+forest_db.workspace = true
+futures.workspace = true
+hex.workspace = true

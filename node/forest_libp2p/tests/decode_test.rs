@@ -1,26 +1,19 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use crypto::{Signature, Signer};
-use forest_address::Address;
+use std::convert::TryFrom;
+
 use forest_blocks::{Block, BlockHeader, FullTipset};
 use forest_libp2p::chain_exchange::{
     ChainExchangeResponse, ChainExchangeResponseStatus, CompactedMessages, TipsetBundle,
 };
-use forest_message::{SignedMessage, UnsignedMessage};
-use num_bigint::BigInt;
-use std::convert::TryFrom;
-use std::error::Error;
-
-const DUMMY_SIG: [u8; 1] = [0u8];
-
-/// Test struct to generate one byte signature for testing
-struct DummySigner;
-impl Signer for DummySigner {
-    fn sign_bytes(&self, _: &[u8], _: &Address) -> Result<Signature, Box<dyn Error>> {
-        Ok(Signature::new_secp256k1(DUMMY_SIG.to_vec()))
-    }
-}
+use forest_message::SignedMessage;
+use forest_shim::{
+    address::Address,
+    crypto::Signature,
+    message::{Message, Message_v3},
+};
+use num::BigInt;
 
 #[test]
 fn convert_single_tipset_bundle() {
@@ -65,30 +58,34 @@ fn tipset_bundle_to_full_tipset() {
         .miner_address(Address::new_id(1))
         .build()
         .unwrap();
-    let ua = UnsignedMessage::builder()
-        .to(Address::new_id(0))
-        .from(Address::new_id(0))
-        .build()
-        .unwrap();
-    let ub = UnsignedMessage::builder()
-        .to(Address::new_id(1))
-        .from(Address::new_id(1))
-        .build()
-        .unwrap();
-    let uc = UnsignedMessage::builder()
-        .to(Address::new_id(2))
-        .from(Address::new_id(2))
-        .build()
-        .unwrap();
-    let ud = UnsignedMessage::builder()
-        .to(Address::new_id(3))
-        .from(Address::new_id(3))
-        .build()
-        .unwrap();
-    let sa = SignedMessage::new(ua.clone(), &DummySigner).unwrap();
-    let sb = SignedMessage::new(ub.clone(), &DummySigner).unwrap();
-    let sc = SignedMessage::new(uc.clone(), &DummySigner).unwrap();
-    let sd = SignedMessage::new(ud.clone(), &DummySigner).unwrap();
+    let ua: Message = Message_v3 {
+        to: Address::new_id(0).into(),
+        from: Address::new_id(0).into(),
+        ..Message_v3::default()
+    }
+    .into();
+    let ub: Message = Message_v3 {
+        to: Address::new_id(1).into(),
+        from: Address::new_id(1).into(),
+        ..Message_v3::default()
+    }
+    .into();
+    let uc: Message = Message_v3 {
+        to: Address::new_id(2).into(),
+        from: Address::new_id(2).into(),
+        ..Message_v3::default()
+    }
+    .into();
+    let ud: Message = Message_v3 {
+        to: Address::new_id(3).into(),
+        from: Address::new_id(3).into(),
+        ..Message_v3::default()
+    }
+    .into();
+    let sa = SignedMessage::new_unchecked(ua.clone(), Signature::new_secp256k1(vec![0]));
+    let sb = SignedMessage::new_unchecked(ub.clone(), Signature::new_secp256k1(vec![0]));
+    let sc = SignedMessage::new_unchecked(uc.clone(), Signature::new_secp256k1(vec![0]));
+    let sd = SignedMessage::new_unchecked(ud.clone(), Signature::new_secp256k1(vec![0]));
 
     let b0 = Block {
         header: h0.clone(),
@@ -127,7 +124,8 @@ fn tipset_bundle_to_full_tipset() {
     );
 
     if let Some(m) = tsb.messages.as_mut() {
-        // Invalidate tipset bundle by not having includes same length as number of blocks
+        // Invalidate tipset bundle by not having includes same length as number of
+        // blocks
         m.secp_msg_includes = vec![vec![0]];
     }
     assert!(

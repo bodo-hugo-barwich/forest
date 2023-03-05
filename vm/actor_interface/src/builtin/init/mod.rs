@@ -1,120 +1,90 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use address::Address;
-use ipld_blockstore::BlockStore;
+use anyhow::Context;
+use cid::Cid;
+use fvm::state_tree::ActorState;
+use fvm_ipld_blockstore::Blockstore;
+use fvm_shared::address::Address;
 use serde::Serialize;
-use std::error::Error;
-use vm::ActorState;
+
+use crate::io::get_obj;
 
 /// Init actor address.
-pub static ADDRESS: &actorv3::INIT_ACTOR_ADDR = &actorv3::INIT_ACTOR_ADDR;
+pub const ADDRESS: Address = Address::new_id(1);
 
 /// Init actor method.
-pub type Method = actorv3::init::Method;
+pub type Method = fil_actor_init_v8::Method;
+
+pub fn is_v8_init_cid(cid: &Cid) -> bool {
+    let known_cids = vec![
+        // calibnet v8
+        Cid::try_from("bafk2bzaceadyfilb22bcvzvnpzbg2lyg6npmperyq6es2brvzjdh5rmywc4ry").unwrap(),
+        // mainnet
+        Cid::try_from("bafk2bzaceaipvjhoxmtofsnv3aj6gj5ida4afdrxa4ewku2hfipdlxpaektlw").unwrap(),
+        // devnet
+        Cid::try_from("bafk2bzacedarbnovmucppbjkcwsxopludrj5ttmtm7mzfqsugmxdnqevqso7o").unwrap(),
+    ];
+    known_cids.contains(cid)
+}
+
+pub fn is_v9_init_cid(cid: &Cid) -> bool {
+    let known_cids = vec![
+        // calibnet v9
+        Cid::try_from("bafk2bzaceczqxpivlxifdo5ohr2rx5ny4uyvssm6tkf7am357xm47x472yxu2").unwrap(),
+        // mainnet v9
+        Cid::try_from("bafk2bzacebtdq4zyuxk2fzbdkva6kc4mx75mkbfmldplfntayhbl5wkqou33i").unwrap(),
+    ];
+    known_cids.contains(cid)
+}
+
+pub fn is_v10_init_cid(cid: &Cid) -> bool {
+    let known_cids = vec![
+        // calibnet v10
+        Cid::try_from("bafk2bzacedhxbcglnonzruxf2jpczara73eh735wf2kznatx2u4gsuhgqwffq").unwrap(),
+        // mainnet v10
+        Cid::try_from("bafk2bzacebb3l4gw6hfszizw5zwho3pfpnmgrmxqm4ie42dgn62325lo4vwc2").unwrap(),
+    ];
+    known_cids.contains(cid)
+}
 
 /// Init actor state.
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum State {
-    V0(actorv0::init::State),
-    V2(actorv2::init::State),
-    V3(actorv3::init::State),
-    V4(actorv4::init::State),
-    V5(actorv5::init::State),
-    V6(actorv6::init::State),
+    V8(fil_actor_init_v8::State),
+    V9(fil_actor_init_v9::State),
+    V10(fil_actor_init_v10::State),
 }
 
 impl State {
-    pub fn load<BS>(store: &BS, actor: &ActorState) -> Result<State, Box<dyn Error>>
+    pub fn load<BS>(store: &BS, actor: &ActorState) -> anyhow::Result<State>
     where
-        BS: BlockStore,
+        BS: Blockstore,
     {
-        if actor.code == *actorv0::INIT_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V0)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else if actor.code == *actorv2::INIT_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V2)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else if actor.code == *actorv3::INIT_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V3)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else if actor.code == *actorv4::INIT_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V4)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else if actor.code == *actorv5::INIT_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V5)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else if actor.code == *actorv6::INIT_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V6)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else {
-            Err(format!("Unknown actor code {}", actor.code).into())
+        if is_v8_init_cid(&actor.code) {
+            return get_obj(store, &actor.state)?
+                .map(State::V8)
+                .context("Actor state doesn't exist in store");
         }
-    }
-
-    /// Allocates a new ID address and stores a mapping of the argument address to it.
-    /// Returns the newly-allocated address.
-    pub fn map_address_to_new_id<BS: BlockStore>(
-        &mut self,
-        store: &BS,
-        addr: &Address,
-    ) -> Result<Address, Box<dyn Error>> {
-        match self {
-            State::V0(st) => Ok(st.map_address_to_new_id(store, addr)?),
-            State::V2(st) => Ok(st.map_address_to_new_id(store, addr)?),
-            State::V3(st) => Ok(st.map_address_to_new_id(store, addr)?),
-            State::V4(st) => Ok(st.map_address_to_new_id(store, addr)?),
-            State::V5(st) => Ok(st.map_address_to_new_id(store, addr)?),
-            State::V6(st) => Ok(st.map_address_to_new_id(store, addr)?),
+        if is_v9_init_cid(&actor.code) {
+            return get_obj(store, &actor.state)?
+                .map(State::V9)
+                .context("Actor state doesn't exist in store");
         }
-    }
-
-    /// ResolveAddress resolves an address to an ID-address, if possible.
-    /// If the provided address is an ID address, it is returned as-is.
-    /// This means that mapped ID-addresses (which should only appear as values, not keys) and
-    /// singleton actor addresses (which are not in the map) pass through unchanged.
-    ///
-    /// Returns an ID-address and `true` if the address was already an ID-address or was resolved
-    /// in the mapping.
-    /// Returns an undefined address and `false` if the address was not an ID-address and not found
-    /// in the mapping.
-    /// Returns an error only if state was inconsistent.
-    pub fn resolve_address<BS: BlockStore>(
-        &self,
-        store: &BS,
-        addr: &Address,
-    ) -> Result<Option<Address>, Box<dyn Error>> {
-        match self {
-            State::V0(st) => st.resolve_address(store, addr),
-            State::V2(st) => st.resolve_address(store, addr),
-            State::V3(st) => st.resolve_address(store, addr),
-            State::V4(st) => st.resolve_address(store, addr),
-            State::V5(st) => st.resolve_address(store, addr),
-            State::V6(st) => st.resolve_address(store, addr),
+        if is_v10_init_cid(&actor.code) {
+            return get_obj(store, &actor.state)?
+                .map(State::V10)
+                .context("Actor state doesn't exist in store");
         }
+        Err(anyhow::anyhow!("Unknown init actor code {}", actor.code))
     }
 
     pub fn into_network_name(self) -> String {
         match self {
-            State::V0(st) => st.network_name,
-            State::V2(st) => st.network_name,
-            State::V3(st) => st.network_name,
-            State::V4(st) => st.network_name,
-            State::V5(st) => st.network_name,
-            State::V6(st) => st.network_name,
+            State::V8(st) => st.network_name,
+            State::V9(st) => st.network_name,
+            State::V10(st) => st.network_name,
         }
     }
 }

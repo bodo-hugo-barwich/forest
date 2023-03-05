@@ -1,21 +1,22 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 //! Common code that's shared across all migration code.
 //! Each network upgrade / state migration code lives in their own module.
 
-use address::Address;
+use std::sync::Arc;
+
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use cid::Cid;
-use clock::ChainEpoch;
-use ipld_blockstore::BlockStore;
-use state_tree::StateTree;
-use vm::{ActorState, TokenAmount};
-
-use async_std::sync::Arc;
+use forest_shim::{
+    state_tree::{ActorState, StateTree},
+    Inner,
+};
+use fvm_ipld_blockstore::Blockstore;
+use fvm_shared::{address::Address, clock::ChainEpoch, econ::TokenAmount};
 use rayon::ThreadPoolBuildError;
-use std::collections::{HashMap, HashSet};
 
-pub mod nv12;
+// pub mod nv12;
 
 pub const ACTORS_COUNT: usize = 11;
 
@@ -54,7 +55,7 @@ pub struct StateMigration<BS> {
     deferred_code_ids: HashSet<Cid>,
 }
 
-impl<BS: BlockStore + Send + Sync> StateMigration<BS> {
+impl<BS: Blockstore + Clone + Send + Sync> StateMigration<BS> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -90,7 +91,7 @@ impl<BS: BlockStore + Send + Sync> StateMigration<BS> {
         );
 
         let pool = rayon::ThreadPoolBuilder::new()
-            .thread_name(|id| format!("nv12 migration thread: {}", id))
+            .thread_name(|id| format!("nv12 migration thread: {id}"))
             .num_threads(cpus)
             .build()
             .map_err(MigrationError::ThreadPoolCreation)?;
@@ -120,20 +121,19 @@ impl<BS: BlockStore + Send + Sync> StateMigration<BS> {
                     let migrator = self.migrations.get(&state.code).cloned().unwrap();
                     scope.spawn(move |_| {
                         let job = MigrationJob {
-                            address,
+                            address: address.into(),
                             actor_state: state,
                             actor_migration: migrator,
                         };
 
                         let job_output = job.run(store_clone, prior_epoch).unwrap_or_else(|e| {
                             panic!(
-                                "failed executing job for address: {}, Reason: {}",
-                                address, e
+                                "failed executing job for address: {address}, Reason: {e}"
                             )
                         });
 
                         job_tx.send(job_output).unwrap_or_else(|_| {
-                            panic!("failed sending job output for address: {}", address)
+                            panic!("failed sending job output for address: {address}")
                         });
                     });
                 }
@@ -146,21 +146,18 @@ impl<BS: BlockStore + Send + Sync> StateMigration<BS> {
                     actor_state,
                 } = job_output;
                 actors_out
-                    .set_actor(&address, actor_state)
+                    .set_actor(&address.into(), actor_state)
                     .unwrap_or_else(|e| {
                         panic!(
-                            "Failed setting new actor state at given address: {}, Reason: {}",
-                            address, e
+                            "Failed setting new actor state at given address: {address}, Reason: {e}"
                         )
                     });
             }
         });
 
-        let root_cid = actors_out
+        actors_out
             .flush()
-            .map_err(|e| MigrationError::FlushFailed(e.to_string()));
-
-        root_cid
+            .map_err(|e| MigrationError::FlushFailed(e.to_string()))
     }
 }
 
@@ -181,7 +178,7 @@ pub struct MigrationOutput {
     new_head: Cid,
 }
 
-pub trait ActorMigration<BS: BlockStore + Send + Sync> {
+pub trait ActorMigration<BS: Blockstore + Send + Sync> {
     fn migrate_state(
         &self,
         store: Arc<BS>,
@@ -189,13 +186,13 @@ pub trait ActorMigration<BS: BlockStore + Send + Sync> {
     ) -> MigrationResult<MigrationOutput>;
 }
 
-struct MigrationJob<BS: BlockStore> {
+struct MigrationJob<BS: Blockstore> {
     address: Address,
     actor_state: ActorState,
     actor_migration: Arc<dyn ActorMigration<BS>>,
 }
 
-impl<BS: BlockStore + Send + Sync> MigrationJob<BS> {
+impl<BS: Blockstore + Send + Sync> MigrationJob<BS> {
     fn run(&self, store: Arc<BS>, prior_epoch: ChainEpoch) -> MigrationResult<MigrationJobOutput> {
         let result = self
             .actor_migration
@@ -203,7 +200,7 @@ impl<BS: BlockStore + Send + Sync> MigrationJob<BS> {
                 store,
                 ActorMigrationInput {
                     address: self.address,
-                    balance: self.actor_state.balance.clone(),
+                    balance: forest_shim::econ::TokenAmount::from(&self.actor_state.balance).into(),
                     head: self.actor_state.state,
                     prior_epoch,
                 },
@@ -217,12 +214,14 @@ impl<BS: BlockStore + Send + Sync> MigrationJob<BS> {
 
         let migration_job_result = MigrationJobOutput {
             address: self.address,
-            actor_state: ActorState::new(
+            actor_state: <ActorState as Inner>::FVM::new(
                 result.new_code_cid,
                 result.new_head,
                 self.actor_state.balance.clone(),
                 self.actor_state.sequence,
-            ),
+                None,
+            )
+            .into(),
         };
 
         Ok(migration_job_result)
@@ -235,7 +234,8 @@ struct MigrationJobOutput {
     actor_state: ActorState,
 }
 
-fn nil_migrator<BS: BlockStore + Send + Sync>(
+#[allow(dead_code)]
+fn nil_migrator<BS: Blockstore + Send + Sync>(
     cid: Cid,
 ) -> Arc<dyn ActorMigration<BS> + Send + Sync> {
     Arc::new(NilMigrator(cid))
@@ -244,7 +244,7 @@ fn nil_migrator<BS: BlockStore + Send + Sync>(
 /// Migrator which preserves the head CID and provides a fixed result code CID.
 pub(crate) struct NilMigrator(Cid);
 
-impl<BS: BlockStore + Send + Sync> ActorMigration<BS> for NilMigrator {
+impl<BS: Blockstore + Send + Sync> ActorMigration<BS> for NilMigrator {
     fn migrate_state(
         &self,
         _store: Arc<BS>,

@@ -1,40 +1,40 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use clock::ChainEpoch;
-use forest_cid::Cid;
+use cid::Cid;
 use forest_encoding::tuple::*;
-use num_bigint::BigInt;
+use forest_shim::bigint::BigInt;
+use fvm_shared::clock::ChainEpoch;
 
-/// Hello message https://filecoin-project.github.io/specs/#hello-spec
-#[derive(Clone, Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
+/// Hello message <https://filecoin-project.github.io/specs/#hello-spec>
+#[derive(Clone, Debug, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
 pub struct HelloRequest {
     pub heaviest_tip_set: Vec<Cid>,
     pub heaviest_tipset_height: ChainEpoch,
-    #[serde(with = "num_bigint::bigint_ser")]
     pub heaviest_tipset_weight: BigInt,
-    pub genesis_hash: Cid,
+    pub genesis_cid: Cid,
 }
 
 /// Response to a Hello message. This just handles latency of the peer.
-#[derive(Clone, Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
 pub struct HelloResponse {
-    /// Time of arrival to peer in unix nanoseconds.
+    /// Time of arrival to peer in UNIX nanoseconds.
     pub arrival: u64,
-    /// Time sent from peer in unix nanoseconds.
+    /// Time sent from peer in UNIX nanoseconds.
     pub sent: u64,
 }
 
 #[cfg(test)]
 mod tests {
+    use cid::multihash::{Code::Identity, MultihashDigest};
+    use fvm_ipld_encoding::{from_slice, to_vec, DAG_CBOR};
+
     use super::*;
-    use forest_cid::Code::Identity;
-    use forest_encoding::*;
 
     #[test]
     fn hello_default_ser() {
         let orig_msg = HelloRequest {
-            genesis_hash: forest_cid::new_from_cbor(&[], Identity),
+            genesis_cid: Cid::new_v1(DAG_CBOR, Identity.digest(&[])),
             heaviest_tipset_weight: Default::default(),
             heaviest_tipset_height: Default::default(),
             heaviest_tip_set: Default::default(),

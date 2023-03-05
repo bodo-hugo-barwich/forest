@@ -1,19 +1,20 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use libp2p::Multiaddr;
-use networks::DEFAULT_BOOTSTRAP;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-/// Libp2p config for the Forest node.
-#[derive(Debug, Deserialize)]
+/// Libp2p configuration for the Forest node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Libp2pConfig {
-    /// Local address.
-    pub listening_multiaddr: Multiaddr,
+    /// Local addresses. Tcp and websocket with dns are supported. By making it
+    /// empty, the libp2p node will not be capable of working as a dialee but
+    /// can still work as a dialer
+    pub listening_multiaddrs: Vec<Multiaddr>,
     /// Bootstrap peer list.
     pub bootstrap_peers: Vec<Multiaddr>,
-    /// Mdns discovery enabled.
+    /// MDNS discovery enabled.
     pub mdns: bool,
     /// Kademlia discovery enabled.
     pub kademlia: bool,
@@ -23,13 +24,9 @@ pub struct Libp2pConfig {
 
 impl Default for Libp2pConfig {
     fn default() -> Self {
-        let bootstrap_peers = DEFAULT_BOOTSTRAP
-            .iter()
-            .map(|node| node.parse().unwrap())
-            .collect();
         Self {
-            listening_multiaddr: "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
-            bootstrap_peers,
+            listening_multiaddrs: vec!["/ip4/0.0.0.0/tcp/0".parse().expect("Infallible")],
+            bootstrap_peers: vec![],
             mdns: false,
             kademlia: true,
             target_peer_count: 75,

@@ -1,0 +1,50 @@
+name: Forest code coverage
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  CACHE_TIMEOUT_MINUTES: 5
+
+jobs:
+  codecov:
+    name: Cover
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Sources
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Apt Dependencies
+        uses: nick-fields/retry@v2
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          command: sudo make install-deps
+      - uses: actions/setup-go@v3
+        with:
+          go-version-file: "node/forest_libp2p/bitswap/tests/go-app/go.mod"
+      - name: Setup sccache
+        uses: hanabi1224/sccache-action@v1.2.0
+        timeout-minutes: ${{ fromJSON(env.CACHE_TIMEOUT_MINUTES) }}
+        continue-on-error: true
+        with:
+          release-name: v0.3.1
+          cache-key: ${{ runner.os }}-sccache-codecov-${{ hashFiles('rust-toolchain.toml') }}
+          cache-update: ${{ github.event_name != 'pull_request' }}
+      - name: Run cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate code coverage
+        run: |
+          ./scripts/gen_coverage_report.sh
+        env:
+          CC: "sccache clang"
+          CXX: "sccache clang++"
+      - name: Upload CodeCov
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: true

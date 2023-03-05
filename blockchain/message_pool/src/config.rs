@@ -1,12 +1,12 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use address::Address;
-use db::Store;
-use encoding::{from_slice, to_vec};
-use serde::{Deserialize, Serialize};
-use std::error::Error as StdError;
 use std::time::Duration;
+
+use forest_db::Store;
+use forest_shim::address::Address;
+use fvm_ipld_encoding::{from_slice, to_vec};
+use serde::{Deserialize, Serialize};
 
 const MPOOL_CONFIG_KEY: &[u8] = b"/mpool/config";
 const SIZE_LIMIT_LOW: i64 = 20000;
@@ -15,7 +15,7 @@ const PRUNE_COOLDOWN: Duration = Duration::from_secs(60); // 1 minute
 const REPLACE_BY_FEE_RATIO: f64 = 1.25;
 const GAS_LIMIT_OVERESTIMATION: f64 = 1.25;
 
-/// Config available for the [MessagePool].
+/// Configuration available for the [`crate::MessagePool`].
 ///
 /// [MessagePool]: crate::MessagePool
 #[derive(Clone, Serialize, Deserialize)]
@@ -53,8 +53,7 @@ impl MpoolConfig {
         // Validate if parameters are valid
         if replace_by_fee_ratio < REPLACE_BY_FEE_RATIO {
             return Err(format!(
-                "replace_by_fee_ratio:{} is less than required: {}",
-                replace_by_fee_ratio, REPLACE_BY_FEE_RATIO
+                "replace_by_fee_ratio:{replace_by_fee_ratio} is less than required: {REPLACE_BY_FEE_RATIO}"
             ));
         }
         if gas_limit_overestimation < 1.0 {
@@ -73,13 +72,14 @@ impl MpoolConfig {
         })
     }
 
-    /// Saves message pool config to the database, to easily reload.
-    pub fn save_config<DB: Store>(&self, store: &DB) -> Result<(), Box<dyn StdError>> {
+    /// Saves message pool `config` to the database, to easily reload.
+    pub fn save_config<DB: Store>(&self, store: &DB) -> Result<(), anyhow::Error> {
         Ok(store.write(MPOOL_CONFIG_KEY, to_vec(&self)?)?)
     }
 
-    /// Load config from store, if exists. If there is no config, uses default.
-    pub fn load_config<DB: Store>(store: &DB) -> Result<Self, Box<dyn StdError>> {
+    /// Load `config` from store, if exists. If there is no `config`, uses
+    /// default.
+    pub fn load_config<DB: Store>(store: &DB) -> Result<Self, anyhow::Error> {
         match store.read(MPOOL_CONFIG_KEY)? {
             Some(v) => Ok(from_slice(&v)?),
             None => Ok(Default::default()),

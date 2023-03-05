@@ -1,4 +1,4 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 //! This module implements network version 12 or actorv4 state migration
@@ -9,23 +9,24 @@
 
 use crate::{ActorMigration, ActorMigrationInput};
 use crate::{MigrationError, MigrationOutput, MigrationResult};
-use actor_interface::actorv3::miner::State as V3State;
-use actor_interface::actorv4::miner::State as V4State;
-use async_std::sync::Arc;
+use cid::multihash::Code::Blake2b256;
 use cid::Cid;
-use cid::Code::Blake2b256;
-use ipld_blockstore::BlockStore;
+use forest_actor_interface::actorv3::miner::State as V3State;
+use forest_actor_interface::actorv4::miner::State as V4State;
+use forest_db::Store;
+use fvm_ipld_blockstore::Blockstore;
+use std::sync::Arc;
 
 pub struct MinerMigrator(Cid);
 
-pub fn miner_migrator_v4<BS: BlockStore + Send + Sync>(
+pub fn miner_migrator_v4<BS: Blockstore + Send + Sync>(
     cid: Cid,
 ) -> Arc<dyn ActorMigration<BS> + Send + Sync> {
     Arc::new(MinerMigrator(cid))
 }
 
 // each actor's state migration is read from blockstore, changes state tree, and writes back to the blocstore.
-impl<BS: BlockStore + Send + Sync> ActorMigration<BS> for MinerMigrator {
+impl<BS: Blockstore + Send + Sync> ActorMigration<BS> for MinerMigrator {
     fn migrate_state(
         &self,
         store: Arc<BS>,

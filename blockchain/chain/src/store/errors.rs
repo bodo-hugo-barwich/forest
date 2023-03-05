@@ -1,12 +1,13 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use blocks::Error as BlkErr;
+use std::fmt::Debug;
+
 use cid::Error as CidErr;
-use db::Error as DbErr;
-use encoding::{error::Error as SerdeErr, Error as EncErr};
-use ipld_amt::Error as AmtErr;
-use std::error::Error as StdError;
+use forest_blocks::Error as BlkErr;
+use forest_db::Error as DbErr;
+use fvm_ipld_amt::Error as AmtErr;
+use fvm_ipld_encoding::Error as EncErr;
 use thiserror::Error;
 
 /// Chain error
@@ -47,12 +48,6 @@ impl From<EncErr> for Error {
     }
 }
 
-impl From<SerdeErr> for Error {
-    fn from(e: SerdeErr) -> Error {
-        Error::Encoding(e.to_string())
-    }
-}
-
 impl From<AmtErr> for Error {
     fn from(e: AmtErr) -> Error {
         Error::State(e.to_string())
@@ -65,8 +60,14 @@ impl From<String> for Error {
     }
 }
 
-impl From<Box<dyn StdError>> for Error {
-    fn from(e: Box<dyn StdError>) -> Self {
+impl From<anyhow::Error> for Error {
+    fn from(e: anyhow::Error) -> Self {
+        Error::Other(e.to_string())
+    }
+}
+
+impl<T> From<flume::SendError<T>> for Error {
+    fn from(e: flume::SendError<T>) -> Self {
         Error::Other(e.to_string())
     }
 }

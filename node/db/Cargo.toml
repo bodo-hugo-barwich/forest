@@ -1,15 +1,45 @@
 [package]
 name = "forest_db"
 description = "Database types used in Forest"
-version = "0.1.0"
-license = "MIT OR Apache-2.0"
-authors = ["ChainSafe Systems <info@chainsafe.io>"]
-edition = "2018"
-repository = "https://github.com/ChainSafe/forest"
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+
+rocksdb = ["dep:rocksdb", "lz4"]
+lz4 = ["rocksdb?/lz4"]
+jemalloc = ["rocksdb?/jemalloc"]
+# not included by default to reduce build time
+# uncomment when it needs to be used by other crates
+# snappy = ["rocksdb?/snappy"]
+# zlib   = ["rocksdb?/zlib"]
+# bzip2  = ["rocksdb?/bzip2"]
+# zstd = ["rocksdb?/zstd"]
+
+paritydb = ["dep:parity-db"]
 
 [dependencies]
-rocksdb = { version = "0.15.0", optional = true }
-sled = { version = "0.34", optional = true }
-parking_lot = "0.11"
-encoding = { package = "forest_encoding", version = "0.2.1" }
-thiserror = "1.0"
+ahash.workspace = true
+anyhow.workspace = true
+cid.workspace = true
+forest_libp2p_bitswap.workspace = true
+fvm_ipld_blockstore.workspace = true
+lazy_static.workspace = true
+libipld.workspace = true
+log.workspace = true
+num_cpus.workspace = true
+parking_lot.workspace = true
+prometheus = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+
+# optional
+parity-db = { version = "0.4", default-features = false, optional = true }
+rocksdb = { version = "0.20", default-features = false, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

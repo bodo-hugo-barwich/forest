@@ -1,52 +1,52 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 pub mod db;
+pub mod metrics;
 
-use log::info;
+use std::{net::TcpListener, path::PathBuf};
+
+use ahash::{HashMap, HashMapExt};
+use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
+use forest_db::DBStatistics;
+use log::warn;
 use prometheus::{Encoder, TextEncoder};
-use thiserror::Error;
+use tokio::sync::RwLock;
 
-use std::net::SocketAddr;
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("Prometheus error: {0}")]
-    Prometheus(prometheus::Error),
-    /// Tide internal error.
-    #[error("Tide error: {0}")]
-    Tide(tide::Error),
-    /// I/O error.
-    #[error("IO error: {0}")]
-    Io(std::io::Error),
-    /// Prometheus port is already in use.
-    #[error("Prometheus port {0} is already in use.")]
-    PortInUse(SocketAddr),
+lazy_static::lazy_static! {
+    static ref REGISTRIES_EXT: RwLock<HashMap<String,prometheus_client::registry::Registry>> = RwLock::new(HashMap::new());
 }
 
-pub async fn init_prometheus(
-    prometheus_addr: SocketAddr,
-    db_directory: String,
-) -> Result<(), Error> {
-    info!("Prometheus server started at {}", prometheus_addr);
+pub async fn add_metrics_registry(name: String, registry: prometheus_client::registry::Registry) {
+    REGISTRIES_EXT.write().await.insert(name, registry);
+}
 
+pub async fn init_prometheus<DB>(
+    prometheus_listener: TcpListener,
+    db_directory: PathBuf,
+    db: DB,
+) -> anyhow::Result<()>
+where
+    DB: DBStatistics + Sync + Send + Clone + 'static,
+{
     let registry = prometheus::default_registry();
 
     // Add the DBCollector to the registry
     let db_collector = crate::db::DBCollector::new(db_directory);
-    registry
-        .register(Box::new(db_collector))
-        .map_err(Error::Prometheus)?;
+    registry.register(Box::new(db_collector))?;
 
     // Create an configure HTTP server
-    let mut server = tide::with_state(());
-    server.at("/metrics").get(collect_metrics);
+    let app = Router::new()
+        .route("/metrics", get(collect_prometheus_metrics))
+        .route("/stats/db", get(collect_db_metrics::<DB>))
+        .with_state(db);
+    let server = axum::Server::from_tcp(prometheus_listener)?.serve(app.into_make_service());
 
     // Wait for server to exit
-    server.listen(prometheus_addr).await.map_err(Error::Io)
+    Ok(server.await?)
 }
 
-async fn collect_metrics(_req: tide::Request<()>) -> tide::Result {
+async fn collect_prometheus_metrics() -> impl IntoResponse {
     let registry = prometheus::default_registry();
     let metric_families = registry.gather();
     let mut metrics = vec![];
@@ -55,8 +55,38 @@ async fn collect_metrics(_req: tide::Request<()>) -> tide::Result {
     encoder
         .encode(&metric_families, &mut metrics)
         .expect("Encoding Prometheus metrics must succeed.");
-    Ok(tide::Response::builder(tide::StatusCode::Ok)
-        .content_type("text/plain; version=0.0.4; charset=utf-8")
-        .body(metrics)
-        .build())
+
+    for (_name, registry) in REGISTRIES_EXT.read().await.iter() {
+        let mut part = String::new();
+        if let Err(e) = prometheus_client::encoding::text::encode(&mut part, registry) {
+            warn!("{e}");
+        }
+        metrics.extend_from_slice(part.as_bytes());
+    }
+
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; charset=utf-8")],
+        metrics,
+    )
+}
+
+#[allow(clippy::unused_async)]
+async fn collect_db_metrics<DB>(
+    axum::extract::State(db): axum::extract::State<DB>,
+) -> impl IntoResponse
+where
+    DB: DBStatistics + Sync + Send + Clone + 'static,
+{
+    let mut metrics = "# DB statistics:\n".to_owned();
+    if let Some(db_stats) = db.get_statistics() {
+        metrics.push_str(&db_stats);
+    } else {
+        metrics.push_str("Not enabled. Set enable_statistics to true in config and restart daemon");
+    }
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; charset=utf-8")],
+        metrics,
+    )
 }

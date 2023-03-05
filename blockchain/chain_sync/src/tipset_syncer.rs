@@ -1,58 +1,59 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use std::cmp::min;
-use std::collections::{HashMap, HashSet};
-use std::convert::TryFrom;
-use std::error::Error as StdError;
-use std::marker::PhantomData;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    cmp::{min, Ordering},
+    convert::TryFrom,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use async_std::future::Future;
-use async_std::pin::Pin;
-use async_std::stream::{Stream, StreamExt};
-use async_std::task::{self, Context, Poll};
-use futures::stream::FuturesUnordered;
+use ahash::{HashMap, HashMapExt, HashSet};
+use cid::Cid;
+use forest_actor_interface::is_account_actor;
+use forest_blocks::{
+    Block, BlockHeader, Error as ForestBlockError, FullTipset, Tipset, TipsetKeys,
+};
+use forest_chain::{persist_objects, ChainStore, Error as ChainStoreError};
+use forest_db::Store;
+use forest_libp2p::chain_exchange::TipsetBundle;
+use forest_message::{message::valid_for_block_inclusion, Message as MessageTrait};
+use forest_networks::Height;
+use forest_shim::{
+    address::Address, gas::price_list_by_network_version, message::Message, state_tree::StateTree,
+};
+use forest_state_manager::{Error as StateManagerError, StateManager};
+use forest_utils::io::ProgressBar;
+use futures::{stream::FuturesUnordered, Stream, StreamExt, TryFutureExt};
+use fvm_ipld_blockstore::Blockstore;
+use fvm_ipld_encoding::Cbor;
+use fvm_shared::{
+    clock::ChainEpoch, crypto::signature::ops::verify_bls_aggregate, ALLOWABLE_CLOCK_DRIFT,
+};
+use fvm_shared3::BLOCK_GAS_LIMIT;
 use log::{debug, error, info, trace, warn};
-use num_bigint::BigInt;
+use nonempty::NonEmpty;
+use num::BigInt;
 use thiserror::Error;
 
-use crate::bad_block_cache::BadBlockCache;
-use crate::metrics;
-use crate::network_context::SyncNetworkContext;
-use crate::sync_state::SyncStage;
-use crate::validation::TipsetValidator;
-use actor::{is_account_actor, power};
-use address::Address;
-use beacon::{Beacon, BeaconEntry, BeaconSchedule, IGNORE_DRAND_VAR};
-use blocks::{Block, BlockHeader, Error as ForestBlockError, FullTipset, Tipset, TipsetKeys};
-use chain::Error as ChainStoreError;
-use chain::{persist_objects, ChainStore};
-use cid::Cid;
-use clock::ChainEpoch;
-use crypto::{verify_bls_aggregate, DomainSeparationTag};
-use encoding::Cbor;
-use encoding::Error as ForestEncodingError;
-use fil_types::{
-    verifier::ProofVerifier, NetworkVersion, Randomness, ALLOWABLE_CLOCK_DRIFT, BLOCK_GAS_LIMIT,
-    TICKET_RANDOMNESS_LOOKBACK,
+use crate::{
+    bad_block_cache::BadBlockCache,
+    consensus::{collect_errs, Consensus},
+    metrics,
+    network_context::SyncNetworkContext,
+    sync_state::SyncStage,
+    validation::TipsetValidator,
 };
-use forest_libp2p::chain_exchange::TipsetBundle;
-use interpreter::price_list_by_epoch;
-use ipld_blockstore::BlockStore;
-use message::{Message, UnsignedMessage};
-use networks::{get_network_version_default, BLOCK_DELAY_SECS, UPGRADE_SMOKE_HEIGHT};
-use state_manager::Error as StateManagerError;
-use state_manager::StateManager;
-use state_tree::StateTree;
 
 const MAX_TIPSETS_TO_REQUEST: u64 = 100;
 
 #[derive(Debug, Error)]
-pub enum TipsetProcessorError {
+pub enum TipsetProcessorError<C: Consensus> {
     #[error("TipsetRangeSyncer error: {0}")]
-    RangeSyncer(#[from] TipsetRangeSyncerError),
+    RangeSyncer(#[from] TipsetRangeSyncerError<C>),
     #[error("Tipset stream closed")]
     StreamClosed,
     #[error("Tipset has already been synced")]
@@ -60,31 +61,21 @@ pub enum TipsetProcessorError {
 }
 
 #[derive(Debug, Error)]
-pub enum TipsetRangeSyncerError {
-    #[error("Tipset added to range syncer does share the same epoch and parents")]
-    InvalidTipsetAdded,
+pub enum TipsetRangeSyncerError<C: Consensus> {
     #[error("Tipset range length is less than 0")]
     InvalidTipsetRangeLength,
     #[error("Provided tiset does not match epoch for the range")]
     InvalidTipsetEpoch,
     #[error("Provided tipset does not match parent for the range")]
     InvalidTipsetParent,
-    #[error("Block must have an election proof included in tipset")]
-    BlockWithoutElectionProof,
     #[error("Block must have a signature")]
     BlockWithoutSignature,
     #[error("Block without BLS aggregate signature")]
     BlockWithoutBlsAggregate,
-    #[error("Block without ticket")]
-    BlockWithoutTicket,
-    #[error("Block had the wrong timestamp: {0} != {1}")]
-    UnequalBlockTimestamps(u64, u64),
     #[error("Block received from the future: now = {0}, block = {1}")]
     TimeTravellingBlock(u64, u64),
     #[error("Tipset range contains bad block [block = {0}]: {1}")]
     TipsetRangeWithBadBlock(Cid, String),
-    #[error("Tipset without ticket to verify")]
-    TipsetWithoutTicket,
     #[error("Validation error: {0}")]
     Validation(String),
     #[error("Processing error: {0}")]
@@ -93,20 +84,6 @@ pub enum TipsetRangeSyncerError {
     ChainStore(#[from] ChainStoreError),
     #[error("StateManager error: {0}")]
     StateManager(#[from] StateManagerError),
-    #[error("Encoding error: {0}")]
-    ForestEncoding(#[from] ForestEncodingError),
-    #[error("Winner election proof verification failed: {0}")]
-    WinnerElectionProofVerificationFailed(String),
-    #[error("Block miner was slashed or is invalid")]
-    InvalidOrSlashedMiner,
-    #[error("Miner power not available for miner address")]
-    MinerPowerNotAvailable,
-    #[error("Miner claimed wrong number of wins: miner = {0}, computed = {1}")]
-    MinerWinClaimsIncorrect(i64, i64),
-    #[error("Drawing chain randomness failed: {0}")]
-    DrawingChainRandomness(String),
-    #[error("Miner isn't elligible to mine")]
-    MinerNotEligibleToMine,
     #[error("Block error: {0}")]
     BlockError(#[from] ForestBlockError),
     #[error("Chain fork length exceeds the maximum")]
@@ -115,34 +92,52 @@ pub enum TipsetRangeSyncerError {
     ChainForkLengthExceedsFinalityThreshold,
     #[error("Chain for block forked from local chain at genesis, refusing to sync block: {0}")]
     ForkAtGenesisBlock(String),
-    #[error("Querying miner power failed: {0}")]
-    MinerPowerUnavailable(String),
-    #[error("Power actor not found")]
-    PowerActorUnavailable,
     #[error("Querying tipsets from the network failed: {0}")]
     NetworkTipsetQueryFailed(String),
     #[error("Query tipset messages from the network failed: {0}")]
     NetworkMessageQueryFailed(String),
-    #[error("Verifying VRF failed: {0}")]
-    VrfValidation(String),
     #[error("BLS aggregate signature {0} was invalid for msgs {1}")]
     BlsAggregateSignatureInvalid(String, String),
     #[error("Message signature invalid: {0}")]
     MessageSignatureInvalid(String),
     #[error("Block message root does not match: expected {0}, computed {1}")]
     BlockMessageRootInvalid(String, String),
-    #[error("Message validation for msg {0} failed: {1}")]
-    BlockMessageValidationFailed(usize, String),
     #[error("Computing message root failed: {0}")]
     ComputingMessageRoot(String),
     #[error("Resolving address from message failed: {0}")]
     ResolvingAddressFromMessage(String),
     #[error("Generating Tipset from bundle failed: {0}")]
     GeneratingTipsetFromTipsetBundle(String),
-    #[error("[INSECURE-POST-VALIDATION] {0}")]
-    InsecurePostValidation(String),
     #[error("Loading tipset parent from the store failed: {0}")]
     TipsetParentNotFound(ChainStoreError),
+    #[error("Consensus error: {0}")]
+    ConsensusError(C::Error),
+}
+
+impl<C: Consensus, T> From<flume::SendError<T>> for TipsetRangeSyncerError<C> {
+    fn from(err: flume::SendError<T>) -> Self {
+        TipsetRangeSyncerError::NetworkTipsetQueryFailed(format!("{err}"))
+    }
+}
+
+impl<C: Consensus> From<tokio::task::JoinError> for TipsetRangeSyncerError<C> {
+    fn from(err: tokio::task::JoinError) -> Self {
+        TipsetRangeSyncerError::NetworkTipsetQueryFailed(format!("{err}"))
+    }
+}
+
+impl<C: Consensus> TipsetRangeSyncerError<C> {
+    /// Concatenate all validation error messages into one comma separated
+    /// version.
+    fn concat(errs: NonEmpty<TipsetRangeSyncerError<C>>) -> Self {
+        let msg = errs
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        TipsetRangeSyncerError::Validation(msg)
+    }
 }
 
 struct TipsetGroup {
@@ -187,21 +182,31 @@ impl TipsetGroup {
     }
 
     fn take_heaviest_tipset(&mut self) -> Option<Arc<Tipset>> {
-        self.tipsets
-            .iter()
-            .enumerate()
-            .max_by_key(|(_idx, ts)| ts.weight())
-            .map(|(idx, _)| idx)
-            .map(|idx| self.tipsets.swap_remove(idx))
+        let (index, _) = self.heaviest_weight();
+        Some(self.tipsets.swap_remove(index))
     }
 
-    fn heaviest_weight(&self) -> BigInt {
+    fn heaviest_weight(&self) -> (usize, &BigInt) {
         // Unwrapping is safe because we initialize the struct with at least one tipset
-        self.tipsets
+        let max = self.tipsets.iter().map(|ts| ts.weight()).max().unwrap();
+
+        let ties = self
+            .tipsets
             .iter()
-            .map(|ts| ts.weight().clone())
-            .max()
-            .unwrap()
+            .enumerate()
+            .filter(|(_, ts)| ts.weight() == max);
+
+        let (index, ts) = ties
+            .reduce(|(i, ts), (j, other)| {
+                // break the tie
+                if ts.break_weight_tie(other) {
+                    (i, ts)
+                } else {
+                    (j, other)
+                }
+            })
+            .unwrap();
+        (index, ts.weight())
     }
 
     fn merge(&mut self, other: Self) {
@@ -215,7 +220,22 @@ impl TipsetGroup {
     }
 
     fn is_heavier_than(&self, other: &Self) -> bool {
-        self.heaviest_weight() > other.heaviest_weight()
+        self.weight_cmp(other).is_gt()
+    }
+
+    fn weight_cmp(&self, other: &Self) -> Ordering {
+        let (i, weight) = self.heaviest_weight();
+        let (j, otherw) = other.heaviest_weight();
+        match weight.cmp(otherw) {
+            Ordering::Equal => {
+                if self.tipsets[i].break_weight_tie(&other.tipsets[j]) {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            }
+            r => r,
+        }
     }
 
     fn tipsets(self) -> Vec<Arc<Tipset>> {
@@ -223,35 +243,35 @@ impl TipsetGroup {
     }
 }
 
-/// The TipsetProcessor receives and prioritizes a stream of Tipsets
-/// for syncing from the ChainMuxer and the SyncSubmitBlock API before syncing.
-/// Each unique Tipset, by epoch and parents, is mapped into a Tipset range which will be synced into the Chain Store.
-pub(crate) struct TipsetProcessor<DB, TBeacon, V> {
-    state: TipsetProcessorState<DB, TBeacon, V>,
+/// The `TipsetProcessor` receives and prioritizes a stream of Tipsets
+/// for syncing from the `ChainMuxer` and the `SyncSubmitBlock` API before
+/// syncing. Each unique Tipset, by epoch and parents, is mapped into a Tipset
+/// range which will be synced into the Chain Store.
+pub(crate) struct TipsetProcessor<DB, C: Consensus> {
+    state: TipsetProcessorState<DB, C>,
     tracker: crate::chain_muxer::WorkerState,
-    /// Tipsets pushed into this stream _must_ be validated beforehand by the TipsetValidator
-    tipsets: Pin<Box<dyn Stream<Item = Arc<Tipset>> + Send>>,
+    /// Tipsets pushed into this stream _must_ be validated beforehand by the
+    /// `TipsetValidator`
+    tipsets: Pin<Box<dyn futures::Stream<Item = Arc<Tipset>> + Send>>,
+    consensus: Arc<C>,
     state_manager: Arc<StateManager<DB>>,
-    beacon: Arc<BeaconSchedule<TBeacon>>,
     network: SyncNetworkContext<DB>,
     chain_store: Arc<ChainStore<DB>>,
     bad_block_cache: Arc<BadBlockCache>,
     genesis: Arc<Tipset>,
-    verifier: PhantomData<V>,
 }
 
-impl<DB, TBeacon, V> TipsetProcessor<DB, TBeacon, V>
+impl<DB, C> TipsetProcessor<DB, C>
 where
-    TBeacon: Beacon + Sync + Send + 'static,
-    DB: BlockStore + Sync + Send + 'static,
-    V: ProofVerifier + Sync + Send + 'static + Unpin,
+    DB: Blockstore + Store + Clone + Sync + Send + 'static,
+    C: Consensus,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tracker: crate::chain_muxer::WorkerState,
-        tipsets: Pin<Box<dyn Stream<Item = Arc<Tipset>> + Send>>,
+        tipsets: Pin<Box<dyn futures::Stream<Item = Arc<Tipset>> + Send>>,
+        consensus: Arc<C>,
         state_manager: Arc<StateManager<DB>>,
-        beacon: Arc<BeaconSchedule<TBeacon>>,
         network: SyncNetworkContext<DB>,
         chain_store: Arc<ChainStore<DB>>,
         bad_block_cache: Arc<BadBlockCache>,
@@ -261,23 +281,22 @@ where
             state: TipsetProcessorState::Idle,
             tracker,
             tipsets,
+            consensus,
             state_manager,
-            beacon,
             network,
             chain_store,
             bad_block_cache,
             genesis,
-            verifier: Default::default(),
         }
     }
 
     fn find_range(
         &self,
         mut tipset_group: TipsetGroup,
-    ) -> TipsetProcessorFuture<TipsetRangeSyncer<DB, TBeacon, V>, TipsetProcessorError> {
+    ) -> TipsetProcessorFuture<TipsetRangeSyncer<DB, C>, TipsetProcessorError<C>> {
+        let consensus = self.consensus.clone();
         let state_manager = self.state_manager.clone();
         let chain_store = self.chain_store.clone();
-        let beacon = self.beacon.clone();
         let network = self.network.clone();
         let bad_block_cache = self.bad_block_cache.clone();
         let tracker = self.tracker.clone();
@@ -285,7 +304,7 @@ where
         Box::pin(async move {
             // Define the low end of the range
             // Unwrapping is safe here because the store always has at least one tipset
-            let current_head = chain_store.heaviest_tipset().await.unwrap();
+            let current_head = chain_store.heaviest_tipset();
             // Unwrapping is safe here because we assume that the
             // tipset group contains at least one tipset
             let proposed_head = tipset_group.take_heaviest_tipset().unwrap();
@@ -298,8 +317,8 @@ where
                 tracker,
                 proposed_head,
                 current_head,
+                consensus,
                 state_manager,
-                beacon,
                 network,
                 chain_store,
                 bad_block_cache,
@@ -315,43 +334,43 @@ where
 
 type TipsetProcessorFuture<T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send>>;
 
-enum TipsetProcessorState<DB, TBeacon, V> {
+enum TipsetProcessorState<DB, C: Consensus> {
     Idle,
     FindRange {
-        range_finder:
-            TipsetProcessorFuture<TipsetRangeSyncer<DB, TBeacon, V>, TipsetProcessorError>,
+        range_finder: TipsetProcessorFuture<TipsetRangeSyncer<DB, C>, TipsetProcessorError<C>>,
         epoch: i64,
         parents: TipsetKeys,
         current_sync: Option<TipsetGroup>,
         next_sync: Option<TipsetGroup>,
     },
     SyncRange {
-        range_syncer: Pin<Box<TipsetRangeSyncer<DB, TBeacon, V>>>,
+        range_syncer: Pin<Box<TipsetRangeSyncer<DB, C>>>,
         next_sync: Option<TipsetGroup>,
     },
 }
 
-impl<DB, TBeacon, V> Future for TipsetProcessor<DB, TBeacon, V>
+impl<DB, C> Future for TipsetProcessor<DB, C>
 where
-    TBeacon: Beacon + Sync + Send + 'static,
-    DB: BlockStore + Sync + Send + 'static,
-    V: ProofVerifier + Sync + Send + 'static + Unpin,
+    DB: Blockstore + Store + Clone + Sync + Send + 'static,
+    C: Consensus,
 {
-    type Output = Result<(), TipsetProcessorError>;
+    type Output = Result<(), TipsetProcessorError<C>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         trace!("Polling TipsetProcessor");
 
         // TODO: Determine if polling the tipset stream before the state machine
-        //       introduces a DOS attack vector where peers send duplicate, valid tipsets over
-        //       GossipSub to divert resources away from syncing tipset ranges.
-        // First, gather the tipsets off of the channel. Reading off the receiver will return immediately.
-        // Ensure that the task will wake up when the stream has a new item by registering it for wakeup.
+        //       introduces a DOS attack vector where peers send duplicate, valid
+        // tipsets over       GossipSub to divert resources away from syncing
+        // tipset ranges. First, gather the tipsets off of the channel. Reading
+        // off the receiver will return immediately. Ensure that the task will
+        // wake up when the stream has a new item by registering it for wakeup.
         // As a tipset is received through the stream we assume:
         //   1. Tipset has at least 1 block
         //   2. Tipset epoch is not behind the current max epoch in the store
-        //   3. Tipset is heavier than the heaviest tipset in the store at the time when it was queued
-        //   4. Tipset message roots were calculated and integrity checks were run
+        //   3. Tipset is heavier than the heaviest tipset in the store at the time when
+        // it was queued   4. Tipset message roots were calculated and integrity
+        // checks were run
 
         // Read all of the tipsets available on the stream
         let mut grouped_tipsets: HashMap<(i64, TipsetKeys), TipsetGroup> = HashMap::new();
@@ -381,14 +400,16 @@ where
 
         trace!("Tipsets received through stream: {}", grouped_tipsets.len());
 
-        // Consume the tipsets read off of the stream and attempt to update the state machine
+        // Consume the tipsets read off of the stream and attempt to update the state
+        // machine
         match self.state {
             TipsetProcessorState::Idle => {
                 // Set the state to FindRange if we have a tipset to sync towards
-                // Consume the tipsets received, start syncing the heaviest tipset group, and discard the rest
+                // Consume the tipsets received, start syncing the heaviest tipset group, and
+                // discard the rest
                 if let Some(((epoch, parents), heaviest_tipset_group)) = grouped_tipsets
                     .into_iter()
-                    .max_by_key(|(_, group)| group.heaviest_weight())
+                    .max_by(|(_, a), (_, b)| a.weight_cmp(b))
                 {
                     trace!("Finding range for tipset epoch = {}", epoch);
                     self.state = TipsetProcessorState::FindRange {
@@ -423,8 +444,8 @@ where
                 // Update or replace the next sync
                 if let Some(heaviest_tipset_group) = grouped_tipsets
                     .into_iter()
+                    .max_by(|(_, a), (_, b)| a.weight_cmp(b))
                     .map(|(_, group)| group)
-                    .max_by_key(|group| group.heaviest_weight())
                 {
                     // Find the heaviest tipset group and either merge it with the
                     // tipset group in the next_sync or replace it.
@@ -435,7 +456,8 @@ where
                                 // Both tipsets groups have the same epoch & parents, so merge them
                                 ns.merge(heaviest_tipset_group);
                             } else if heaviest_tipset_group.is_heavier_than(ns) {
-                                // The tipset group received is heavier than the one saved, replace it.
+                                // The tipset group received is heavier than the one saved, replace
+                                // it.
                                 *next_sync = Some(heaviest_tipset_group);
                             }
                             // Otherwise, drop the heaviest tipset group
@@ -470,8 +492,8 @@ where
                 // Update or replace the next sync
                 if let Some(heaviest_tipset_group) = grouped_tipsets
                     .into_iter()
+                    .max_by(|(_, a), (_, b)| a.weight_cmp(b))
                     .map(|(_, group)| group)
-                    .max_by_key(|group| group.heaviest_weight())
                 {
                     // Find the heaviest tipset group and either merge it with the
                     // tipset group in the next_sync or replace it.
@@ -482,7 +504,8 @@ where
                                 // Both tipsets groups have the same epoch & parents, so merge them
                                 ns.merge(heaviest_tipset_group);
                             } else if heaviest_tipset_group.is_heavier_than(ns) {
-                                // The tipset group received is heavier than the one saved, replace it.
+                                // The tipset group received is heavier than the one saved, replace
+                                // it.
                                 *next_sync = Some(heaviest_tipset_group);
                             } else {
                                 // Otherwise, drop the heaviest tipset group
@@ -598,41 +621,39 @@ enum InvalidBlockStrategy {
     Forgiving,
 }
 
-type TipsetRangeSyncerFuture =
-    Pin<Box<dyn Future<Output = Result<(), TipsetRangeSyncerError>> + Send>>;
+type TipsetRangeSyncerFuture<C> =
+    Pin<Box<dyn Future<Output = Result<(), TipsetRangeSyncerError<C>>> + Send>>;
 
-pub(crate) struct TipsetRangeSyncer<DB, TBeacon, V> {
+pub(crate) struct TipsetRangeSyncer<DB, C: Consensus> {
     pub proposed_head: Arc<Tipset>,
     pub current_head: Arc<Tipset>,
     tipsets_included: HashSet<TipsetKeys>,
-    tipset_tasks: Pin<Box<FuturesUnordered<TipsetRangeSyncerFuture>>>,
+    tipset_tasks: Pin<Box<FuturesUnordered<TipsetRangeSyncerFuture<C>>>>,
     state_manager: Arc<StateManager<DB>>,
-    beacon: Arc<BeaconSchedule<TBeacon>>,
     network: SyncNetworkContext<DB>,
     chain_store: Arc<ChainStore<DB>>,
     bad_block_cache: Arc<BadBlockCache>,
     genesis: Arc<Tipset>,
-    verifier: PhantomData<V>,
+    consensus: Arc<C>,
 }
 
-impl<DB, TBeacon, V> TipsetRangeSyncer<DB, TBeacon, V>
+impl<DB, C> TipsetRangeSyncer<DB, C>
 where
-    TBeacon: Beacon + Sync + Send + 'static,
-    DB: BlockStore + Sync + Send + 'static,
-    V: ProofVerifier + Sync + Send + Unpin + 'static,
+    DB: Blockstore + Store + Clone + Sync + Send + 'static,
+    C: Consensus,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tracker: crate::chain_muxer::WorkerState,
         proposed_head: Arc<Tipset>,
         current_head: Arc<Tipset>,
+        consensus: Arc<C>,
         state_manager: Arc<StateManager<DB>>,
-        beacon: Arc<BeaconSchedule<TBeacon>>,
         network: SyncNetworkContext<DB>,
         chain_store: Arc<ChainStore<DB>>,
         bad_block_cache: Arc<BadBlockCache>,
         genesis: Arc<Tipset>,
-    ) -> Result<Self, TipsetRangeSyncerError> {
+    ) -> Result<Self, TipsetRangeSyncerError<C>> {
         let tipset_tasks = Box::pin(FuturesUnordered::new());
         let tipset_range_length = proposed_head.epoch() - current_head.epoch();
 
@@ -641,42 +662,40 @@ where
             return Err(TipsetRangeSyncerError::InvalidTipsetRangeLength);
         }
 
-        tipset_tasks.push(sync_tipset_range::<_, _, V>(
+        tipset_tasks.push(sync_tipset_range(
             proposed_head.clone(),
             current_head.clone(),
             tracker,
             // Casting from i64 -> u64 is safe because we ensured that
             // the value is greater than 0
             tipset_range_length as u64,
+            consensus.clone(),
             state_manager.clone(),
             chain_store.clone(),
             network.clone(),
             bad_block_cache.clone(),
-            beacon.clone(),
             genesis.clone(),
         ));
 
-        let mut tipsets_included = HashSet::new();
-        tipsets_included.insert(proposed_head.key());
+        let tipsets_included = HashSet::from_iter([proposed_head.key().clone()]);
         Ok(Self {
             proposed_head,
             current_head,
-            tipsets_included: HashSet::new(),
+            tipsets_included,
             tipset_tasks,
+            consensus,
             state_manager,
-            beacon,
             network,
             chain_store,
             bad_block_cache,
             genesis,
-            verifier: Default::default(),
         })
     }
 
     pub fn add_tipset(
         &mut self,
         additional_head: Arc<Tipset>,
-    ) -> Result<bool, TipsetRangeSyncerError> {
+    ) -> Result<bool, TipsetRangeSyncerError<C>> {
         let new_key = additional_head.key().clone();
         // Ignore duplicate tipsets
         if self.tipsets_included.contains(&new_key) {
@@ -699,13 +718,13 @@ where
         // Keep track of tipsets included
         self.tipsets_included.insert(new_key);
 
-        self.tipset_tasks.push(sync_tipset::<_, _, V>(
+        self.tipset_tasks.push(sync_tipset(
             additional_head,
+            self.consensus.clone(),
             self.state_manager.clone(),
             self.chain_store.clone(),
             self.network.clone(),
             self.bad_block_cache.clone(),
-            self.beacon.clone(),
             self.genesis.clone(),
         ));
         Ok(true)
@@ -720,13 +739,12 @@ where
     }
 }
 
-impl<DB, TBeacon, V> Future for TipsetRangeSyncer<DB, TBeacon, V>
+impl<DB, C> Future for TipsetRangeSyncer<DB, C>
 where
-    TBeacon: Beacon + Sync + Send + 'static,
-    DB: BlockStore + Sync + Send + 'static,
-    V: Sync + Send + Unpin + 'static,
+    DB: Blockstore + Sync + Send + 'static,
+    C: Consensus,
 {
-    type Output = Result<(), TipsetRangeSyncerError>;
+    type Output = Result<(), TipsetRangeSyncerError<C>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         loop {
@@ -740,84 +758,84 @@ where
     }
 }
 
+/// Sync headers backwards from the proposed head to the current one, requesting
+/// missing tipsets from the network. Once headers are available, download
+/// messages going forward on the chain and validate each extension. Finally set
+/// the proposed head as the heaviest tipset.
 #[allow(clippy::too_many_arguments)]
-fn sync_tipset_range<
-    DB: BlockStore + Sync + Send + 'static,
-    TBeacon: Beacon + Sync + Send + 'static,
-    V: ProofVerifier + Sync + Send + 'static,
->(
+fn sync_tipset_range<DB: Blockstore + Store + Clone + Sync + Send + 'static, C: Consensus>(
     proposed_head: Arc<Tipset>,
     current_head: Arc<Tipset>,
     tracker: crate::chain_muxer::WorkerState,
     tipset_range_length: u64,
+    consensus: Arc<C>,
     state_manager: Arc<StateManager<DB>>,
     chain_store: Arc<ChainStore<DB>>,
     network: SyncNetworkContext<DB>,
     bad_block_cache: Arc<BadBlockCache>,
-    beacon: Arc<BeaconSchedule<TBeacon>>,
     genesis: Arc<Tipset>,
-) -> TipsetRangeSyncerFuture {
+) -> TipsetRangeSyncerFuture<C> {
     Box::pin(async move {
         tracker
             .write()
-            .await
             .init(current_head.clone(), proposed_head.clone());
 
         let parent_tipsets = match sync_headers_in_reverse(
             tracker.clone(),
             tipset_range_length,
             proposed_head.clone(),
-            current_head.clone(),
-            bad_block_cache.clone(),
-            chain_store.clone(),
+            &current_head,
+            &bad_block_cache,
+            &chain_store,
             network.clone(),
         )
         .await
         {
             Ok(parent_tipsets) => parent_tipsets,
             Err(why) => {
-                tracker.write().await.error(why.to_string());
+                tracker.write().error(why.to_string());
                 return Err(why);
             }
         };
 
         // Persist the blocks from the synced Tipsets into the store
-        tracker.write().await.set_stage(SyncStage::Headers);
+        tracker.write().set_stage(SyncStage::Headers);
         let headers: Vec<&BlockHeader> = parent_tipsets.iter().flat_map(|t| t.blocks()).collect();
         if let Err(why) = persist_objects(chain_store.blockstore(), &headers) {
-            tracker.write().await.error(why.to_string());
+            tracker.write().error(why.to_string());
             return Err(why.into());
         };
 
         //  Sync and validate messages from the tipsets
-        tracker.write().await.set_stage(SyncStage::Messages);
-        if let Err(why) = sync_messages_check_state::<_, _, V>(
+        tracker.write().set_stage(SyncStage::Messages);
+        if let Err(why) = sync_messages_check_state(
             tracker.clone(),
+            consensus,
             state_manager,
-            beacon,
             network,
             chain_store.clone(),
-            bad_block_cache,
+            &bad_block_cache,
             parent_tipsets,
-            genesis,
+            &genesis,
             InvalidBlockStrategy::Strict,
         )
         .await
         {
             error!("Sync messages check state failed for tipset range");
-            tracker.write().await.error(why.to_string());
+            tracker.write().error(why.to_string());
             return Err(why);
         };
-        tracker.write().await.set_stage(SyncStage::Complete);
+        tracker.write().set_stage(SyncStage::Complete);
 
-        // At this point the head is synced and it can be set in the store as the heaviest
+        // At this point the head is synced and it can be set in the store as the
+        // heaviest
         debug!(
             "Tipset range successfully verified: EPOCH = [{}, {}], HEAD_KEY = {:?}",
             proposed_head.epoch(),
             current_head.epoch(),
             proposed_head.key()
         );
-        if let Err(why) = chain_store.put_tipset(&proposed_head).await {
+        if let Err(why) = chain_store.put_tipset::<C>(&proposed_head) {
             error!(
                 "Putting tipset range head [EPOCH = {}, KEYS = {:?}] in the store failed: {}",
                 proposed_head.epoch(),
@@ -830,30 +848,38 @@ fn sync_tipset_range<
     })
 }
 
-async fn sync_headers_in_reverse<DB: BlockStore + Sync + Send + 'static>(
+/// Download headers between the proposed head and the current one available
+/// locally. If they turn out to be on different forks, download more headers up
+/// to a certain limit to try to find a common ancestor.
+async fn sync_headers_in_reverse<
+    DB: Blockstore + Store + Clone + Sync + Send + 'static,
+    C: Consensus,
+>(
     tracker: crate::chain_muxer::WorkerState,
     tipset_range_length: u64,
     proposed_head: Arc<Tipset>,
-    current_head: Arc<Tipset>,
-    bad_block_cache: Arc<BadBlockCache>,
-    chain_store: Arc<ChainStore<DB>>,
+    current_head: &Tipset,
+    bad_block_cache: &BadBlockCache,
+    chain_store: &ChainStore<DB>,
     network: SyncNetworkContext<DB>,
-) -> Result<Vec<Arc<Tipset>>, TipsetRangeSyncerError> {
+) -> Result<Vec<Arc<Tipset>>, TipsetRangeSyncerError<C>> {
     let mut parent_blocks: Vec<Cid> = vec![];
     let mut parent_tipsets = Vec::with_capacity(tipset_range_length as usize + 1);
     parent_tipsets.push(proposed_head.clone());
-    tracker.write().await.set_epoch(current_head.epoch());
+    tracker.write().set_epoch(current_head.epoch());
+
+    let total_size = proposed_head.epoch() - current_head.epoch();
+    let pb = ProgressBar::new(total_size as u64);
+    pb.message("Downloading headers ");
+    pb.set_max_refresh_rate(Some(std::time::Duration::from_millis(500)));
 
     'sync: loop {
         // Unwrapping is safe here because the tipset vector always
         // has at least one element
         let oldest_parent = parent_tipsets.last().unwrap();
-        validate_tipset_against_cache(
-            bad_block_cache.clone(),
-            oldest_parent.parents(),
-            &parent_blocks,
-        )
-        .await?;
+        let work_to_be_done = oldest_parent.epoch() - current_head.epoch();
+        pb.set((work_to_be_done - total_size).unsigned_abs());
+        validate_tipset_against_cache(bad_block_cache, oldest_parent.parents(), &parent_blocks)?;
 
         // Check if we are at the end of the range
         if oldest_parent.epoch() <= current_head.epoch() {
@@ -862,7 +888,7 @@ async fn sync_headers_in_reverse<DB: BlockStore + Sync + Send + 'static>(
             break;
         }
         // Attempt to load the parent tipset from local store
-        if let Ok(tipset) = chain_store.tipset_from_keys(oldest_parent.parents()).await {
+        if let Ok(tipset) = chain_store.tipset_from_keys(oldest_parent.parents()) {
             parent_blocks.extend_from_slice(tipset.cids());
             parent_tipsets.push(tipset);
             continue;
@@ -881,13 +907,14 @@ async fn sync_headers_in_reverse<DB: BlockStore + Sync + Send + 'static>(
             if tipset.epoch() < current_head.epoch() {
                 break 'sync;
             }
-            validate_tipset_against_cache(bad_block_cache.clone(), tipset.key(), &parent_blocks)
-                .await?;
+            validate_tipset_against_cache(bad_block_cache, tipset.key(), &parent_blocks)?;
             parent_blocks.extend_from_slice(tipset.cids());
-            tracker.write().await.set_epoch(tipset.epoch());
+            tracker.write().set_epoch(tipset.epoch());
             parent_tipsets.push(tipset);
         }
     }
+    pb.finish();
+
     // Unwrapping is safe here because we assume that the tipset
     // vector was initialized with a tipset that will not be removed
     let oldest_tipset = parent_tipsets.last().unwrap().clone();
@@ -901,17 +928,17 @@ async fn sync_headers_in_reverse<DB: BlockStore + Sync + Send + 'static>(
             .chain_exchange_headers(None, oldest_tipset.parents(), FORK_LENGTH_THRESHOLD)
             .await
             .map_err(TipsetRangeSyncerError::NetworkTipsetQueryFailed)?;
-        let mut potential_common_ancestor =
-            chain_store.tipset_from_keys(current_head.parents()).await?;
+        let mut potential_common_ancestor = chain_store.tipset_from_keys(current_head.parents())?;
+        let mut i = 0;
         let mut fork_length = 1;
-        for (i, tipset) in fork_tipsets.iter().enumerate() {
-            if tipset.epoch() == 0 {
+        while i < fork_tipsets.len() {
+            if fork_tipsets[i].epoch() == 0 {
                 return Err(TipsetRangeSyncerError::ForkAtGenesisBlock(format!(
                     "{:?}",
                     oldest_tipset.cids()
                 )));
             }
-            if potential_common_ancestor == *tipset {
+            if potential_common_ancestor == fork_tipsets[i] {
                 // Remove elements from the vector since the Drain
                 // iterator is immediately dropped
                 let mut fork_tipsets = fork_tipsets;
@@ -923,56 +950,53 @@ async fn sync_headers_in_reverse<DB: BlockStore + Sync + Send + 'static>(
             // If the potential common ancestor has an epoch which
             // is lower than the current fork tipset under evaluation
             // move to the next iteration without updated the potential common ancestor
-            if potential_common_ancestor.epoch() < tipset.epoch() {
-                continue;
+            if potential_common_ancestor.epoch() < fork_tipsets[i].epoch() {
+                i += 1;
+            } else {
+                fork_length += 1;
+                // Increment the fork length and enforce the fork length check
+                if fork_length > FORK_LENGTH_THRESHOLD {
+                    return Err(TipsetRangeSyncerError::ChainForkLengthExceedsMaximum);
+                }
+                // If we have not found a common ancestor by the last iteration, then return an
+                // error
+                if i == (fork_tipsets.len() - 1) {
+                    return Err(TipsetRangeSyncerError::ChainForkLengthExceedsFinalityThreshold);
+                }
+                potential_common_ancestor =
+                    chain_store.tipset_from_keys(potential_common_ancestor.parents())?;
             }
-            fork_length += 1;
-            // Increment the fork length and enfore the fork length check
-            if fork_length > FORK_LENGTH_THRESHOLD {
-                return Err(TipsetRangeSyncerError::ChainForkLengthExceedsMaximum);
-            }
-            // If we have not found a common ancestor by the last iteration, then return an error
-            if i == (fork_tipsets.len() - 1) {
-                return Err(TipsetRangeSyncerError::ChainForkLengthExceedsFinalityThreshold);
-            }
-            potential_common_ancestor = chain_store
-                .tipset_from_keys(potential_common_ancestor.parents())
-                .await?;
         }
     }
     Ok(parent_tipsets)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sync_tipset<
-    DB: BlockStore + Sync + Send + 'static,
-    TBeacon: Beacon + Sync + Send + 'static,
-    V: ProofVerifier + Sync + Send + 'static,
->(
+fn sync_tipset<DB: Blockstore + Store + Clone + Sync + Send + 'static, C: Consensus>(
     proposed_head: Arc<Tipset>,
+    consensus: Arc<C>,
     state_manager: Arc<StateManager<DB>>,
     chain_store: Arc<ChainStore<DB>>,
     network: SyncNetworkContext<DB>,
     bad_block_cache: Arc<BadBlockCache>,
-    beacon: Arc<BeaconSchedule<TBeacon>>,
     genesis: Arc<Tipset>,
-) -> TipsetRangeSyncerFuture {
+) -> TipsetRangeSyncerFuture<C> {
     Box::pin(async move {
         // Persist the blocks from the proposed tipsets into the store
         let headers: Vec<&BlockHeader> = proposed_head.blocks().iter().collect();
         persist_objects(chain_store.blockstore(), &headers)?;
 
         // Sync and validate messages from the tipsets
-        if let Err(e) = sync_messages_check_state::<_, _, V>(
+        if let Err(e) = sync_messages_check_state(
             // Include a dummy WorkerState
             crate::chain_muxer::WorkerState::default(),
+            consensus,
             state_manager,
-            beacon,
             network,
             chain_store.clone(),
-            bad_block_cache,
+            &bad_block_cache,
             vec![proposed_head.clone()],
-            genesis,
+            &genesis,
             InvalidBlockStrategy::Forgiving,
         )
         .await
@@ -981,9 +1005,10 @@ fn sync_tipset<
             return Err(e);
         }
 
-        // Add the tipset to the store. The tipset will be expanded with other blocks with
-        // the same [epoch, parents] before updating the heaviest Tipset in the store.
-        if let Err(why) = chain_store.put_tipset(&proposed_head).await {
+        // Add the tipset to the store. The tipset will be expanded with other blocks
+        // with the same [epoch, parents] before updating the heaviest Tipset in
+        // the store.
+        if let Err(why) = chain_store.put_tipset::<C>(&proposed_head) {
             error!(
                 "Putting tipset [EPOCH = {}, KEYS = {:?}] in the store failed: {}",
                 proposed_head.epoch(),
@@ -996,121 +1021,140 @@ fn sync_tipset<
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn sync_messages_check_state<
-    DB: BlockStore + Send + Sync + 'static,
-    TBeacon: Beacon + Sync + Send + 'static,
-    V: ProofVerifier + Sync + Send + 'static,
->(
-    tracker: crate::chain_muxer::WorkerState,
-    state_manager: Arc<StateManager<DB>>,
-    beacon_scheduler: Arc<BeaconSchedule<TBeacon>>,
-    network: SyncNetworkContext<DB>,
-    chainstore: Arc<ChainStore<DB>>,
-    bad_block_cache: Arc<BadBlockCache>,
-    tipsets: Vec<Arc<Tipset>>,
-    genesis: Arc<Tipset>,
-    invalid_block_strategy: InvalidBlockStrategy,
-) -> Result<(), TipsetRangeSyncerError> {
-    // Iterate through tipsets in chronological order
-    let mut tipset_iter = tipsets.into_iter().rev();
+async fn fetch_batch<DB: Blockstore + Store + Clone + Send + Sync + 'static, C: Consensus>(
+    batch: &[Arc<Tipset>],
+    network: &SyncNetworkContext<DB>,
+    chainstore: &ChainStore<DB>,
+    s: &flume::Sender<FullTipset>,
+) -> Result<(), TipsetRangeSyncerError<C>> {
+    // Tipsets in `batch` are already in chronological order
+    if let Some(head) = batch.last() {
+        let epoch = head.epoch();
+        let len = batch.len();
 
-    // Sync the messages for one tipset @ a time
-    const REQUEST_WINDOW: usize = 1;
+        debug!("ChainExchange message sync tipsets: epoch: {epoch}, len: {len}");
 
-    while let Some(tipset) = tipset_iter.next() {
-        match chainstore.fill_tipset(&tipset) {
-            Some(full_tipset) => {
-                let current_epoch = full_tipset.epoch();
-                validate_tipset::<_, _, V>(
-                    state_manager.clone(),
-                    beacon_scheduler.clone(),
-                    chainstore.clone(),
-                    bad_block_cache.clone(),
-                    full_tipset,
-                    genesis.clone(),
-                    invalid_block_strategy,
-                )
-                .await?;
-                tracker.write().await.set_epoch(current_epoch);
+        let compacted_messages = network
+            .chain_exchange_messages(None, head.key(), len as u64)
+            .await
+            .map_err(TipsetRangeSyncerError::NetworkMessageQueryFailed)?;
+
+        // Since the bundle only has messages, we have to put the headers in them
+        for (messages, tipset) in compacted_messages.into_iter().rev().zip(batch.iter()) {
+            // Construct full tipset from fetched messages
+            let bundle = TipsetBundle {
+                blocks: tipset.blocks().to_vec(),
+                messages: Some(messages),
+            };
+
+            let full_tipset = FullTipset::try_from(&bundle)
+                .map_err(TipsetRangeSyncerError::GeneratingTipsetFromTipsetBundle)?;
+
+            // Persist the messages in the store
+            if let Some(m) = bundle.messages {
+                forest_chain::persist_objects(chainstore.blockstore(), &m.bls_msgs)?;
+                forest_chain::persist_objects(chainstore.blockstore(), &m.secp_msgs)?;
+            } else {
+                warn!("ChainExchange request for messages returned null messages");
             }
-            None => {
-                // Full tipset is not in storage; request messages via chain_exchange
-                let batch_size = REQUEST_WINDOW;
-                debug!(
-                    "ChainExchange message sync tipsets: epoch: {}, len: {}",
-                    tipset.epoch(),
-                    batch_size,
-                );
 
-                // Receive tipset bundle from block sync
-                let compacted_messages = network
-                    .chain_exchange_messages(None, tipset.key(), batch_size as u64)
-                    .await
-                    .map_err(TipsetRangeSyncerError::NetworkMessageQueryFailed)?;
-                // Chain current tipset with iterator
-                let mut inner_iter = std::iter::once(tipset).chain(&mut tipset_iter);
-
-                // Since the bundle only has messages, we have to put the headers in them
-                for messages in compacted_messages {
-                    // Construct full tipset from fetched messages
-                    let tipset = inner_iter.next().ok_or_else(|| {
-                        TipsetRangeSyncerError::NetworkMessageQueryFailed(String::from(
-                            "Messages returned exceeded tipsets in chain",
-                        ))
-                    })?;
-
-                    let bundle = TipsetBundle {
-                        blocks: tipset.blocks().to_vec(),
-                        messages: Some(messages),
-                    };
-
-                    let full_tipset = FullTipset::try_from(&bundle)
-                        .map_err(TipsetRangeSyncerError::GeneratingTipsetFromTipsetBundle)?;
-
-                    // Validate the tipset and the messages
-                    let timer = metrics::TIPSET_PROCESSING_TIME.start_timer();
-                    let current_epoch = full_tipset.epoch();
-                    validate_tipset::<_, _, V>(
-                        state_manager.clone(),
-                        beacon_scheduler.clone(),
-                        chainstore.clone(),
-                        bad_block_cache.clone(),
-                        full_tipset,
-                        genesis.clone(),
-                        invalid_block_strategy,
-                    )
-                    .await?;
-                    tracker.write().await.set_epoch(current_epoch);
-                    timer.observe_duration();
-
-                    // Persist the messages in the store
-                    if let Some(m) = bundle.messages {
-                        chain::persist_objects(chainstore.blockstore(), &m.bls_msgs)?;
-                        chain::persist_objects(chainstore.blockstore(), &m.secp_msgs)?;
-                    } else {
-                        warn!("ChainExchange request for messages returned null messages");
-                    }
-                }
-            }
+            s.send_async(full_tipset).await?;
         }
     }
+
     Ok(())
 }
 
-async fn validate_tipset<
-    DB: BlockStore + Send + Sync + 'static,
-    TBeacon: Beacon + Sync + Send + 'static,
-    V: ProofVerifier + Sync + Send + 'static,
+/// Going forward along the tipsets, try to load the messages in them from the
+/// `BlockStore`, or download them from the network, then validate the full
+/// tipset on each epoch.
+#[allow(clippy::too_many_arguments)]
+async fn sync_messages_check_state<
+    DB: Blockstore + Store + Clone + Send + Sync + 'static,
+    C: Consensus,
 >(
+    tracker: crate::chain_muxer::WorkerState,
+    consensus: Arc<C>,
     state_manager: Arc<StateManager<DB>>,
-    beacon_scheduler: Arc<BeaconSchedule<TBeacon>>,
+    network: SyncNetworkContext<DB>,
     chainstore: Arc<ChainStore<DB>>,
-    bad_block_cache: Arc<BadBlockCache>,
-    full_tipset: FullTipset,
-    genesis: Arc<Tipset>,
+    bad_block_cache: &BadBlockCache,
+    tipsets: Vec<Arc<Tipset>>,
+    genesis: &Tipset,
     invalid_block_strategy: InvalidBlockStrategy,
-) -> Result<(), TipsetRangeSyncerError> {
+) -> Result<(), TipsetRangeSyncerError<C>> {
+    // Sync the messages for one or many tipsets @ a time
+    const REQUEST_WINDOW: usize = 4;
+
+    let task_chainstore = chainstore.clone();
+
+    // Spawn a background task for the chain_exchange message requests
+
+    let (s, r) = flume::bounded(REQUEST_WINDOW * 2);
+    let handle = tokio::task::spawn(async move {
+        let mut batch: Vec<Arc<Tipset>> = Vec::with_capacity(REQUEST_WINDOW);
+
+        // Visit tipsets in chronological order
+        for tipset in tipsets.into_iter().rev() {
+            // If the current tipset batch is empty and we already have the
+            // messages for the current tipset, skip the download and send
+            // it directly to the validator.
+            if batch.is_empty() {
+                if let Some(full_tipset) = task_chainstore.fill_tipset(&tipset) {
+                    s.send_async(full_tipset).await?;
+                    continue;
+                }
+            }
+
+            // Request tipset messages via chain_exchange
+            batch.push(tipset);
+            if batch.len() == REQUEST_WINDOW {
+                fetch_batch(&batch, &network, &task_chainstore, &s).await?;
+                batch.clear();
+            }
+        }
+        // Fetch last batch
+        fetch_batch(&batch, &network, &task_chainstore, &s).await?;
+
+        Ok(())
+    });
+
+    // Validation loop
+    while let Ok(full_tipset) = r.recv_async().await {
+        let current_epoch = full_tipset.epoch();
+        {
+            let _timer = metrics::TIPSET_PROCESSING_TIME.start_timer();
+            validate_tipset::<_, C>(
+                consensus.clone(),
+                state_manager.clone(),
+                &chainstore,
+                bad_block_cache,
+                full_tipset,
+                genesis,
+                invalid_block_strategy,
+            )
+            .await?;
+        }
+        tracker.write().set_epoch(current_epoch);
+        metrics::LAST_VALIDATED_TIPSET_EPOCH.set(current_epoch as u64);
+    }
+
+    handle.await?
+}
+
+/// Validates full blocks in the tipset in parallel (since the messages are not
+/// executed), adding the successful ones to the tipset tracker, and the failed
+/// ones to the bad block cache, depending on strategy. Any bad block fails
+/// validation.
+async fn validate_tipset<DB: Blockstore + Store + Clone + Send + Sync + 'static, C: Consensus>(
+    consensus: Arc<C>,
+    state_manager: Arc<StateManager<DB>>,
+    chainstore: &ChainStore<DB>,
+    bad_block_cache: &BadBlockCache,
+    full_tipset: FullTipset,
+    genesis: &Tipset,
+    invalid_block_strategy: InvalidBlockStrategy,
+) -> Result<(), TipsetRangeSyncerError<C>> {
     if full_tipset.key().eq(genesis.key()) {
         trace!("Skipping genesis tipset validation");
         return Ok(());
@@ -1120,19 +1164,27 @@ async fn validate_tipset<
     let full_tipset_key = full_tipset.key().clone();
 
     let mut validations = FuturesUnordered::new();
-    for b in full_tipset.into_blocks() {
-        let validation_fn = task::spawn(validate_block::<_, _, V>(
+    let blocks = full_tipset.into_blocks();
+
+    info!(
+        "Validating tipset: EPOCH = {epoch}, N blocks = {}",
+        blocks.len()
+    );
+    debug!("Tipset keys: {:?}", full_tipset_key.cids);
+
+    for b in blocks {
+        let validation_fn = tokio::task::spawn(validate_block::<_, C>(
+            consensus.clone(),
             state_manager.clone(),
-            beacon_scheduler.clone(),
             Arc::new(b),
         ));
         validations.push(validation_fn);
     }
 
     while let Some(result) = validations.next().await {
-        match result {
+        match result? {
             Ok(block) => {
-                chainstore.add_to_tipset_tracker(block.header()).await;
+                chainstore.add_to_tipset_tracker(block.header());
             }
             Err((cid, why)) => {
                 warn!(
@@ -1148,7 +1200,7 @@ async fn validate_tipset<
                         TipsetRangeSyncerError::TimeTravellingBlock(_, _)
                         | TipsetRangeSyncerError::TipsetParentNotFound(_) => (),
                         why => {
-                            bad_block_cache.put(cid, why.to_string()).await;
+                            bad_block_cache.put(cid, why.to_string());
                         }
                     }
                 }
@@ -1156,25 +1208,39 @@ async fn validate_tipset<
             }
         }
     }
-    info!(
-        "Validating tipset: EPOCH = {}, KEY = {:?}",
-        epoch, full_tipset_key.cids,
-    );
+    // Doing flush here creates small sst files at ~20KB
+    // Then we need to manually compact them by calling CompactFiles
+    // which however is not exposed by rocksdb or librocksdb-sys crates
+    // if let Err(e) = chainstore.db.flush() {
+    //     warn!("Failed to flush db: {e}");
+    // }
     Ok(())
 }
 
-/// Validates block semantically according to https://github.com/filecoin-project/specs/blob/6ab401c0b92efb6420c6e198ec387cf56dc86057/validation.md
+/// Validate the block according to the rules specific to the consensus being
+/// used, and the common rules that pertain to the assumptions of the
+/// `ChainSync` protocol.
+///
 /// Returns the validated block if `Ok`.
-/// Returns the block cid (for marking bad) and `Error` if invalid (`Err`).
-async fn validate_block<
-    DB: BlockStore + Sync + Send + 'static,
-    TBeacon: Beacon + Sync + Send + 'static,
-    V: ProofVerifier + Sync + Send + 'static,
->(
+/// Returns the block CID (for marking bad) and `Error` if invalid (`Err`).
+///
+/// Common validation includes:
+/// * Sanity checks
+/// * Clock drifts
+/// * Signatures
+/// * Message inclusion (fees, sequences)
+/// * Parent related fields: base fee, weight, the state root
+/// * NB: This is where the messages in the *parent* tipset are executed.
+///
+/// Consensus specific validation should include:
+/// * Checking that the messages in the block correspond to the agreed upon
+///   total ordering
+/// * That the block is a deterministic derivative of the underlying consensus
+async fn validate_block<DB: Blockstore + Store + Clone + Sync + Send + 'static, C: Consensus>(
+    consensus: Arc<C>,
     state_manager: Arc<StateManager<DB>>,
-    beacon_schedule: Arc<BeaconSchedule<TBeacon>>,
     block: Arc<Block>,
-) -> Result<Arc<Block>, (Cid, TipsetRangeSyncerError)> {
+) -> Result<Arc<Block>, (Cid, TipsetRangeSyncerError<C>)> {
     trace!(
         "Validating block: epoch = {}, weight = {}, key = {}",
         block.header().epoch(),
@@ -1191,16 +1257,17 @@ async fn validate_block<
     if is_validated {
         return Ok(block);
     }
-    let mut error_vec: Vec<String> = vec![];
-    let mut validations = FuturesUnordered::new();
+
+    let _timer = metrics::BLOCK_VALIDATION_TIME.start_timer();
+
     let header = block.header();
 
     // Check to ensure all optional values exist
     block_sanity_checks(header).map_err(|e| (*block_cid, e))?;
+    block_timestamp_checks(header).map_err(|e| (*block_cid, e))?;
 
     let base_tipset = chain_store
         .tipset_from_keys(header.parents())
-        .await
         // The parent tipset will always be there when calling validate_block
         // as part of the sync_tipset_range flow because all of the headers in the range
         // have been committed to the store. When validate_block is called from sync_tipset
@@ -1212,107 +1279,65 @@ async fn validate_block<
                 TipsetRangeSyncerError::TipsetParentNotFound(why),
             )
         })?;
-    let win_p_nv = state_manager.get_network_version(base_tipset.epoch());
 
     // Retrieve lookback tipset for validation
-    let (lookback_tipset, lookback_state) = state_manager
-        .get_lookback_tipset_for_round::<V>(base_tipset.clone(), block.header().epoch())
-        .await
-        .map_err(|e| (*block_cid, e.into()))?;
-    let lookback_state = Arc::new(lookback_state);
-    let prev_beacon = chain_store
-        .latest_beacon_entry(&base_tipset)
-        .await
-        .map(Arc::new)
-        .map_err(|e| (*block_cid, e.into()))?;
-
-    // Timestamp checks
-    let nulls = (header.epoch() - (base_tipset.epoch() + 1)) as u64;
-    let target_timestamp = base_tipset.min_timestamp() + BLOCK_DELAY_SECS * (nulls + 1);
-    if target_timestamp != header.timestamp() {
-        return Err((
-            *block_cid,
-            TipsetRangeSyncerError::UnequalBlockTimestamps(header.timestamp(), target_timestamp),
-        ));
-    }
-    let time_now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Retrieved system time before UNIX epoch")
-        .as_secs();
-    if header.timestamp() > time_now + ALLOWABLE_CLOCK_DRIFT {
-        return Err((
-            *block_cid,
-            TipsetRangeSyncerError::TimeTravellingBlock(time_now, header.timestamp()),
-        ));
-    } else if header.timestamp() > time_now {
-        warn!(
-            "Got block from the future, but within clock drift threshold, {} > {}",
-            header.timestamp(),
-            time_now
-        );
-    }
+    let lookback_state = state_manager
+        .get_lookback_tipset_for_round(base_tipset.clone(), block.header().epoch())
+        .map_err(|e| (*block_cid, e.into()))
+        .map(|(_, s)| Arc::new(s))?;
 
     // Work address needed for async validations, so necessary
     // to do sync to avoid duplication
     let work_addr = state_manager
-        .get_miner_work_addr(&lookback_state, header.miner_address())
+        .get_miner_work_addr(*lookback_state, header.miner_address())
         .map_err(|e| (*block_cid, e.into()))?;
 
     // Async validations
+    let validations = FuturesUnordered::new();
 
     // Check block messages
-    let v_block = Arc::clone(&block);
-    let v_base_tipset = Arc::clone(&base_tipset);
-    let v_state_manager = Arc::clone(&state_manager);
-    validations.push(task::spawn_blocking(move || {
-        check_block_messages::<_, V>(v_state_manager, &v_block, &v_base_tipset)
-            .map_err(|e| TipsetRangeSyncerError::Validation(e.to_string()))
-    }));
-
-    // Miner validations
-    let v_state_manager = Arc::clone(&state_manager);
-    let v_block = Arc::clone(&block);
-    let v_base_tipset = Arc::clone(&base_tipset);
-    validations.push(task::spawn_blocking(move || {
-        let headers = v_block.header();
-        validate_miner(
-            &v_state_manager,
-            headers.miner_address(),
-            v_base_tipset.parent_state(),
-        )
-    }));
+    validations.push(tokio::task::spawn(check_block_messages::<_, C>(
+        Arc::clone(&state_manager),
+        Arc::clone(&block),
+        Arc::clone(&base_tipset),
+    )));
 
     // Base fee check
+    let smoke_height = state_manager.chain_config().epoch(Height::Smoke);
     let v_base_tipset = Arc::clone(&base_tipset);
-    let v_block_store = state_manager.blockstore_cloned();
+    let v_block_store = state_manager.blockstore().clone();
     let v_block = Arc::clone(&block);
-    validations.push(task::spawn_blocking(move || {
-        let base_fee =
-            chain::compute_base_fee(v_block_store.as_ref(), &v_base_tipset).map_err(|e| {
-                TipsetRangeSyncerError::Validation(format!("Could not compute base fee: {}", e))
+    validations.push(tokio::task::spawn_blocking(move || {
+        let _timer = metrics::BLOCK_VALIDATION_TASKS_TIME
+            .with_label_values(&[metrics::values::BASE_FEE_CHECK])
+            .start_timer();
+        let base_fee = forest_chain::compute_base_fee(&v_block_store, &v_base_tipset, smoke_height)
+            .map_err(|e| {
+                TipsetRangeSyncerError::<C>::Validation(format!("Could not compute base fee: {e}"))
             })?;
         let parent_base_fee = v_block.header.parent_base_fee();
-        if &base_fee != parent_base_fee {
-            return Err(TipsetRangeSyncerError::Validation(format!(
-                "base fee doesn't match: {} (header), {} (computed)",
-                parent_base_fee, base_fee
+        if base_fee != parent_base_fee.clone() {
+            return Err(TipsetRangeSyncerError::<C>::Validation(format!(
+                "base fee doesn't match: {parent_base_fee} (header), {base_fee} (computed)"
             )));
         }
         Ok(())
     }));
 
     // Parent weight calculation check
-    let v_block_store = state_manager.blockstore_cloned();
+    let v_block_store = state_manager.blockstore().clone();
     let v_base_tipset = Arc::clone(&base_tipset);
     let weight = header.weight().clone();
-    validations.push(task::spawn_blocking(move || {
-        let calc_weight = chain::weight(v_block_store.as_ref(), &v_base_tipset).map_err(|e| {
-            TipsetRangeSyncerError::Calculation(format!("Error calculating weight: {}", e))
+    validations.push(tokio::task::spawn_blocking(move || {
+        let _timer = metrics::BLOCK_VALIDATION_TASKS_TIME
+            .with_label_values(&[metrics::values::PARENT_WEIGHT_CAL])
+            .start_timer();
+        let calc_weight = C::weight(&v_block_store, &v_base_tipset).map_err(|e| {
+            TipsetRangeSyncerError::Calculation(format!("Error calculating weight: {e}"))
         })?;
         if weight != calc_weight {
-            return Err(TipsetRangeSyncerError::Validation(format!(
-                "Parent weight doesn't match: {} (header), {} (computed)",
-                weight, calc_weight
+            return Err(TipsetRangeSyncerError::<C>::Validation(format!(
+                "Parent weight doesn't match: {weight} (header), {calc_weight} (computed)"
             )));
         }
         Ok(())
@@ -1322,23 +1347,25 @@ async fn validate_block<
     let v_state_manager = Arc::clone(&state_manager);
     let v_base_tipset = Arc::clone(&base_tipset);
     let v_block = Arc::clone(&block);
-    validations.push(task::spawn(async move {
+    validations.push(tokio::task::spawn(async move {
         let header = v_block.header();
         let (state_root, receipt_root) = v_state_manager
-            .tipset_state::<V>(&v_base_tipset)
+            .tipset_state(&v_base_tipset)
             .await
             .map_err(|e| {
-                TipsetRangeSyncerError::Calculation(format!("Failed to calculate state: {}", e))
+                TipsetRangeSyncerError::Calculation(format!("Failed to calculate state: {e}"))
             })?;
+
         if &state_root != header.state_root() {
-            return Err(TipsetRangeSyncerError::Validation(format!(
+            return Err(TipsetRangeSyncerError::<C>::Validation(format!(
                 "Parent state root did not match computed state: {} (header), {} (computed)",
                 header.state_root(),
                 state_root,
             )));
         }
+
         if &receipt_root != header.message_receipts() {
-            return Err(TipsetRangeSyncerError::Validation(format!(
+            return Err(TipsetRangeSyncerError::<C>::Validation(format!(
                 "Parent receipt root did not match computed root: {} (header), {} (computed)",
                 header.message_receipts(),
                 receipt_root
@@ -1347,146 +1374,36 @@ async fn validate_block<
         Ok(())
     }));
 
-    // Winner election PoSt validations
-    let v_block = Arc::clone(&block);
-    let v_prev_beacon = Arc::clone(&prev_beacon);
-    let v_base_tipset = Arc::clone(&base_tipset);
-    let v_state_manager = Arc::clone(&state_manager);
-    let v_lookback_state = lookback_state.clone();
-    validations.push(task::spawn_blocking(move || {
-        let header = v_block.header();
-
-        // Safe to unwrap because checked to `Some` in sanity check
-        let election_proof = header.election_proof().as_ref().unwrap();
-        if election_proof.win_count < 1 {
-            return Err(TipsetRangeSyncerError::Validation(
-                "Block is not claiming to be a winner".to_string(),
-            ));
-        }
-        let hp = v_state_manager.eligible_to_mine(
-            header.miner_address(),
-            &v_base_tipset,
-            &lookback_tipset,
-        )?;
-        if !hp {
-            return Err(TipsetRangeSyncerError::MinerNotEligibleToMine);
-        }
-        let r_beacon = header.beacon_entries().last().unwrap_or(&v_prev_beacon);
-        let miner_address_buf = header.miner_address().marshal_cbor()?;
-        let vrf_base = state_manager::chain_rand::draw_randomness(
-            r_beacon.data(),
-            DomainSeparationTag::ElectionProofProduction,
-            header.epoch(),
-            &miner_address_buf,
-        )
-        .map_err(|e| TipsetRangeSyncerError::DrawingChainRandomness(e.to_string()))?;
-        verify_election_post_vrf(&work_addr, &vrf_base, election_proof.vrfproof.as_bytes())?;
-
-        if v_state_manager.is_miner_slashed(header.miner_address(), v_base_tipset.parent_state())? {
-            return Err(TipsetRangeSyncerError::InvalidOrSlashedMiner);
-        }
-        let (mpow, tpow) = v_state_manager
-            .get_power(&v_lookback_state, Some(header.miner_address()))?
-            .ok_or(TipsetRangeSyncerError::MinerPowerNotAvailable)?;
-
-        let j = election_proof.compute_win_count(&mpow.quality_adj_power, &tpow.quality_adj_power);
-        if election_proof.win_count != j {
-            return Err(TipsetRangeSyncerError::MinerWinClaimsIncorrect(
-                election_proof.win_count,
-                j,
-            ));
-        }
-
-        Ok(())
-    }));
-
     // Block signature check
-    let v_block = Arc::clone(&block);
-    validations.push(task::spawn_blocking(move || {
+    let v_block = block.clone();
+    validations.push(tokio::task::spawn_blocking(move || {
+        let _timer = metrics::BLOCK_VALIDATION_TASKS_TIME
+            .with_label_values(&[metrics::values::BLOCK_SIGNATURE_CHECK])
+            .start_timer();
         v_block.header().check_block_signature(&work_addr)?;
         Ok(())
     }));
 
-    // Beacon values check
-    if std::env::var(IGNORE_DRAND_VAR) != Ok("1".to_owned()) {
-        let v_block = Arc::clone(&block);
-        let parent_epoch = base_tipset.epoch();
-        let v_prev_beacon = Arc::clone(&prev_beacon);
-        validations.push(task::spawn(async move {
-            v_block
-                .header()
-                .validate_block_drand(beacon_schedule.as_ref(), parent_epoch, &v_prev_beacon)
-                .await
-                .map_err(|e| {
-                    TipsetRangeSyncerError::Validation(format!(
-                        "Failed to validate blocks random beacon values: {}",
-                        e
-                    ))
-                })
-        }));
-    }
-
-    // Ticket election proof validations
-    let v_block = Arc::clone(&block);
-    let v_prev_beacon = Arc::clone(&prev_beacon);
-    validations.push(task::spawn_blocking(move || {
-        let header = v_block.header();
-        let mut miner_address_buf = header.miner_address().marshal_cbor()?;
-
-        if header.epoch() > UPGRADE_SMOKE_HEIGHT {
-            let vrf_proof = base_tipset
-                .min_ticket()
-                .ok_or(TipsetRangeSyncerError::TipsetWithoutTicket)?
-                .vrfproof
-                .as_bytes();
-            miner_address_buf.extend_from_slice(vrf_proof);
-        }
-
-        let beacon_base = header.beacon_entries().last().unwrap_or(&v_prev_beacon);
-
-        let vrf_base = state_manager::chain_rand::draw_randomness(
-            beacon_base.data(),
-            DomainSeparationTag::TicketProduction,
-            header.epoch() - TICKET_RANDOMNESS_LOOKBACK,
-            &miner_address_buf,
-        )
-        .map_err(|e| TipsetRangeSyncerError::DrawingChainRandomness(e.to_string()))?;
-
-        verify_election_post_vrf(
-            &work_addr,
-            &vrf_base,
-            // Safe to unwrap here because of block sanity checks
-            header.ticket().as_ref().unwrap().vrfproof.as_bytes(),
-        )?;
-
-        Ok(())
-    }));
-
-    // Winning PoSt proof validation
     let v_block = block.clone();
-    let v_prev_beacon = Arc::clone(&prev_beacon);
-    validations.push(task::spawn_blocking(move || {
-        verify_winning_post_proof::<_, V>(
-            &state_manager,
-            win_p_nv,
-            v_block.header(),
-            &v_prev_beacon,
-            &lookback_state,
-        )?;
-        Ok(())
+    validations.push(tokio::task::spawn(async move {
+        consensus
+            .validate_block(state_manager, v_block)
+            .map_err(|errs| {
+                // NOTE: Concatenating errors here means the wrapper type of error
+                // never surfaces, yet we always pay the cost of the generic argument.
+                // But there's no reason `validate_block` couldn't return a list of all
+                // errors instead of a single one that has all the error messages,
+                // removing the caller's ability to distinguish between them.
+                let errs = errs.map(|err| TipsetRangeSyncerError::<C>::ConsensusError(err));
+
+                TipsetRangeSyncerError::<C>::concat(errs)
+            })
+            .await
     }));
 
     // Collect the errors from the async validations
-    while let Some(result) = validations.next().await {
-        if let Err(e) = result {
-            error_vec.push(e.to_string());
-        }
-    }
-
-    // Combine the vector of error strings and return Validation error with this resultant string
-    if !error_vec.is_empty() {
-        let error_string = error_vec.join(", ");
-        return Err((*block_cid, TipsetRangeSyncerError::Validation(error_string)));
+    if let Err(errs) = collect_errs(validations).await {
+        return Err((*block_cid, TipsetRangeSyncerError::<C>::concat(errs)));
     }
 
     chain_store
@@ -1494,9 +1411,8 @@ async fn validate_block<
         .map_err(|e| {
             (
                 *block_cid,
-                TipsetRangeSyncerError::Validation(format!(
-                    "failed to mark block {} as validated {}",
-                    block_cid, e
+                TipsetRangeSyncerError::<C>::Validation(format!(
+                    "failed to mark block {block_cid} as validated {e}"
                 )),
             )
         })?;
@@ -1504,103 +1420,27 @@ async fn validate_block<
     Ok(block)
 }
 
-fn validate_miner<DB: BlockStore + Send + Sync + 'static>(
-    state_manager: &StateManager<DB>,
-    miner_addr: &Address,
-    tipset_state: &Cid,
-) -> Result<(), TipsetRangeSyncerError> {
-    let actor = state_manager
-        .get_actor(power::ADDRESS, tipset_state)?
-        .ok_or(TipsetRangeSyncerError::PowerActorUnavailable)?;
-    let state = power::State::load(state_manager.blockstore(), &actor)
-        .map_err(|err| TipsetRangeSyncerError::MinerPowerUnavailable(err.to_string()))?;
-    state
-        .miner_power(state_manager.blockstore(), miner_addr)
-        .map_err(|err| TipsetRangeSyncerError::MinerPowerUnavailable(err.to_string()))?;
-    Ok(())
-}
-
-fn verify_election_post_vrf(
-    worker: &Address,
-    rand: &[u8],
-    evrf: &[u8],
-) -> Result<(), TipsetRangeSyncerError> {
-    crypto::verify_vrf(worker, rand, evrf).map_err(TipsetRangeSyncerError::VrfValidation)
-}
-
-fn verify_winning_post_proof<DB: BlockStore + Send + Sync + 'static, V: ProofVerifier>(
-    state_manager: &StateManager<DB>,
-    network_version: NetworkVersion,
-    header: &BlockHeader,
-    prev_beacon_entry: &BeaconEntry,
-    lookback_state: &Cid,
-) -> Result<(), TipsetRangeSyncerError> {
-    if cfg!(feature = "insecure_post") {
-        let wpp = header.winning_post_proof();
-        if wpp.is_empty() {
-            return Err(TipsetRangeSyncerError::InsecurePostValidation(
-                String::from("No winning PoSt proof provided"),
-            ));
-        }
-        if wpp[0].proof_bytes == b"valid_proof" {
-            return Ok(());
-        }
-        return Err(TipsetRangeSyncerError::InsecurePostValidation(
-            String::from("Winning PoSt is invalid"),
-        ));
-    }
-
-    let miner_addr_buf = header.miner_address().marshal_cbor()?;
-    let rand_base = header
-        .beacon_entries()
-        .iter()
-        .last()
-        .unwrap_or(prev_beacon_entry);
-    let rand = state_manager::chain_rand::draw_randomness(
-        rand_base.data(),
-        DomainSeparationTag::WinningPoStChallengeSeed,
-        header.epoch(),
-        &miner_addr_buf,
-    )
-    .map_err(|e| TipsetRangeSyncerError::DrawingChainRandomness(e.to_string()))?;
-    let id = header.miner_address().id().map_err(|e| {
-        TipsetRangeSyncerError::Validation(format!(
-            "failed to get ID from miner address {}: {}",
-            header.miner_address(),
-            e
-        ))
-    })?;
-    let sectors = state_manager
-        .get_sectors_for_winning_post::<V>(
-            lookback_state,
-            network_version,
-            header.miner_address(),
-            Randomness(rand.to_vec()),
-        )
-        .map_err(|e| {
-            TipsetRangeSyncerError::Validation(format!("Failed to get sectors for PoSt: {}", e))
-        })?;
-
-    V::verify_winning_post(
-        Randomness(rand.to_vec()),
-        header.winning_post_proof(),
-        &sectors,
-        id,
-    )
-    .map_err(|e| {
-        TipsetRangeSyncerError::Validation(format!("Failed to verify winning PoSt: {}", e))
-    })
-}
-
-fn check_block_messages<
-    DB: BlockStore + Send + Sync + 'static,
-    V: ProofVerifier + Sync + Send + 'static,
+/// Validate messages in a full block, relative to the parent tipset.
+///
+/// This includes:
+/// * signature checks
+/// * gas limits, and prices
+/// * account nonce values
+/// * the message root in the header
+///
+/// NB: This loads/computes the state resulting from the execution of the parent
+/// tipset.
+async fn check_block_messages<
+    DB: Blockstore + Store + Clone + Send + Sync + 'static,
+    C: Consensus,
 >(
     state_manager: Arc<StateManager<DB>>,
-    block: &Block,
-    base_tipset: &Arc<Tipset>,
-) -> Result<(), TipsetRangeSyncerError> {
-    let network_version = get_network_version_default(block.header.epoch());
+    block: Arc<Block>,
+    base_tipset: Arc<Tipset>,
+) -> Result<(), TipsetRangeSyncerError<C>> {
+    let network_version = state_manager
+        .chain_config()
+        .network_version(block.header.epoch());
 
     // Do the initial loop here
     // check block message and signatures in them
@@ -1609,11 +1449,11 @@ fn check_block_messages<
     for m in block.bls_msgs() {
         let pk = StateManager::get_bls_public_key(
             state_manager.blockstore(),
-            m.from(),
-            base_tipset.parent_state(),
+            &m.from.into(),
+            *base_tipset.parent_state(),
         )?;
         pub_keys.push(pk);
-        cids.push(m.to_signing_bytes());
+        cids.push(m.cid().unwrap().to_bytes());
     }
 
     if let Some(sig) = block.header().bls_aggregate() {
@@ -1627,98 +1467,103 @@ fn check_block_messages<
                 .map(|x| &x[..])
                 .collect::<Vec<&[u8]>>()
                 .as_slice(),
-            sig,
+            &sig.into(),
         ) {
             return Err(TipsetRangeSyncerError::BlsAggregateSignatureInvalid(
-                format!("{:?}", sig),
-                format!("{:?}", cids),
+                format!("{sig:?}"),
+                format!("{cids:?}"),
             ));
         }
     } else {
         return Err(TipsetRangeSyncerError::BlockWithoutBlsAggregate);
     }
-    let price_list = price_list_by_epoch(base_tipset.epoch());
+
+    let price_list = price_list_by_network_version(network_version);
     let mut sum_gas_limit = 0;
 
     // Check messages for validity
-    let mut check_msg = |msg: &UnsignedMessage,
+    let mut check_msg = |msg: &Message,
                          account_sequences: &mut HashMap<Address, u64>,
-                         tree: &StateTree<DB>|
-     -> Result<(), Box<dyn StdError>> {
+                         tree: &StateTree<&DB>|
+     -> Result<(), anyhow::Error> {
         // Phase 1: Syntactic validation
         let min_gas = price_list.on_chain_message(msg.marshal_cbor().unwrap().len());
-        msg.valid_for_block_inclusion(min_gas.total(), network_version)?;
-        sum_gas_limit += msg.gas_limit();
+        valid_for_block_inclusion(msg, min_gas.total(), network_version)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        sum_gas_limit += msg.gas_limit;
         if sum_gas_limit > BLOCK_GAS_LIMIT {
-            return Err("block gas limit exceeded".into());
+            anyhow::bail!("block gas limit exceeded");
         }
 
         // Phase 2: (Partial) Semantic validation
         // Send exists and is an account actor, and sequence is correct
-        let sequence: u64 = match account_sequences.get(msg.from()) {
+        let sequence: u64 = match account_sequences.get(&msg.from()) {
             Some(sequence) => *sequence,
             None => {
-                let actor = tree.get_actor(msg.from())?.ok_or({
-                    "Failed to retrieve nonce for addr: Actor does not exist in state"
+                let actor = tree.get_actor(&msg.from.into())?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Failed to retrieve nonce for addr: Actor does not exist in state"
+                    )
                 })?;
                 if !is_account_actor(&actor.code) {
-                    return Err("Sending must be an account actor".into());
+                    anyhow::bail!("Sending must be an account actor");
                 }
                 actor.sequence
             }
         };
 
         // Sequence equality check
-        if sequence != msg.sequence() {
-            return Err(format!(
+        if sequence != msg.sequence {
+            anyhow::bail!(
                 "Message has incorrect sequence (exp: {} got: {})",
                 sequence,
-                msg.sequence()
-            )
-            .into());
+                msg.sequence
+            );
         }
-        account_sequences.insert(*msg.from(), sequence + 1);
+        account_sequences.insert(msg.from(), sequence + 1);
         Ok(())
     };
 
     let mut account_sequences: HashMap<Address, u64> = HashMap::default();
     let block_store = state_manager.blockstore();
-    let (state_root, _) =
-        task::block_on(state_manager.tipset_state::<V>(base_tipset)).map_err(|e| {
-            TipsetRangeSyncerError::Calculation(format!("Could not update state: {}", e))
-        })?;
+    let (state_root, _) = state_manager
+        .tipset_state(&base_tipset)
+        .await
+        .map_err(|e| TipsetRangeSyncerError::Calculation(format!("Could not update state: {e}")))?;
     let tree = StateTree::new_from_root(block_store, &state_root).map_err(|e| {
         TipsetRangeSyncerError::Calculation(format!(
-            "Could not load from new state root in state manager: {}",
-            e
+            "Could not load from new state root in state manager: {e}"
         ))
     })?;
 
     // Check validity for BLS messages
     for (i, msg) in block.bls_msgs().iter().enumerate() {
         check_msg(msg, &mut account_sequences, &tree).map_err(|e| {
-            TipsetRangeSyncerError::Validation(format!(
-                "Block had invalid BLS message at index {}: {}",
-                i, e
+            TipsetRangeSyncerError::<C>::Validation(format!(
+                "Block had invalid BLS message at index {i}: {e}"
             ))
         })?;
     }
 
     // Check validity for SECP messages
     for (i, msg) in block.secp_msgs().iter().enumerate() {
+        // https://github.com/ChainSafe/forest/issues/2601
+        if msg.is_delegated() {
+            continue;
+        }
         check_msg(msg.message(), &mut account_sequences, &tree).map_err(|e| {
-            TipsetRangeSyncerError::Validation(format!(
-                "block had an invalid secp message at index {}: {}",
-                i, e
+            TipsetRangeSyncerError::<C>::Validation(format!(
+                "block had an invalid secp message at index {i}: {e}"
             ))
         })?;
         // Resolve key address for signature verification
-        let key_addr =
-            task::block_on(state_manager.resolve_to_key_addr::<V>(msg.from(), base_tipset))
-                .map_err(|e| TipsetRangeSyncerError::ResolvingAddressFromMessage(e.to_string()))?;
+        let key_addr = state_manager
+            .resolve_to_key_addr(&msg.from(), &base_tipset)
+            .await
+            .map_err(|e| TipsetRangeSyncerError::ResolvingAddressFromMessage(e.to_string()))?;
         // SecP256K1 Signature validation
         msg.signature
-            .verify(&msg.message().to_signing_bytes(), &key_addr)
+            .verify(&msg.message().cid().unwrap().to_bytes(), &key_addr.into())
             .map_err(TipsetRangeSyncerError::MessageSignatureInvalid)?;
     }
 
@@ -1729,41 +1574,63 @@ fn check_block_messages<
     if block.header().messages() != &msg_root {
         return Err(TipsetRangeSyncerError::BlockMessageRootInvalid(
             format!("{:?}", block.header().messages()),
-            format!("{:?}", msg_root),
+            format!("{msg_root:?}"),
         ));
     }
 
     Ok(())
 }
 
-/// Checks optional values in header and returns reference to the values.
-fn block_sanity_checks(header: &BlockHeader) -> Result<(), TipsetRangeSyncerError> {
-    if header.election_proof().is_none() {
-        return Err(TipsetRangeSyncerError::BlockWithoutElectionProof);
-    }
+/// Checks optional values in header.
+///
+/// It only looks for fields which are common to all consensus types.
+fn block_sanity_checks<C: Consensus>(
+    header: &BlockHeader,
+) -> Result<(), TipsetRangeSyncerError<C>> {
     if header.signature().is_none() {
         return Err(TipsetRangeSyncerError::BlockWithoutSignature);
     }
     if header.bls_aggregate().is_none() {
         return Err(TipsetRangeSyncerError::BlockWithoutBlsAggregate);
     }
-    if header.ticket().is_none() {
-        return Err(TipsetRangeSyncerError::BlockWithoutTicket);
+    Ok(())
+}
+
+/// Check the clock drift.
+fn block_timestamp_checks<C: Consensus>(
+    header: &BlockHeader,
+) -> Result<(), TipsetRangeSyncerError<C>> {
+    // TODO: Time should come from a component we control, for testing.
+    let time_now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Retrieved system time before UNIX epoch")
+        .as_secs();
+    if header.timestamp() > time_now + ALLOWABLE_CLOCK_DRIFT {
+        return Err(TipsetRangeSyncerError::TimeTravellingBlock(
+            time_now,
+            header.timestamp(),
+        ));
+    } else if header.timestamp() > time_now {
+        warn!(
+            "Got block from the future, but within clock drift threshold, {} > {}",
+            header.timestamp(),
+            time_now
+        );
     }
     Ok(())
 }
 
-async fn validate_tipset_against_cache(
-    bad_block_cache: Arc<BadBlockCache>,
+/// Check if any CID in `tipset` is a known bad block.
+/// If so, add all their descendants to the bad block cache and return an error.
+fn validate_tipset_against_cache<C: Consensus>(
+    bad_block_cache: &BadBlockCache,
     tipset: &TipsetKeys,
     descendant_blocks: &[Cid],
-) -> Result<(), TipsetRangeSyncerError> {
+) -> Result<(), TipsetRangeSyncerError<C>> {
     for cid in tipset.cids() {
-        if let Some(reason) = bad_block_cache.get(cid).await {
+        if let Some(reason) = bad_block_cache.get(cid) {
             for block_cid in descendant_blocks {
-                bad_block_cache
-                    .put(*block_cid, format!("chain contained {}", cid))
-                    .await;
+                bad_block_cache.put(*block_cid, format!("chain contained {cid}"));
             }
             return Err(TipsetRangeSyncerError::TipsetRangeWithBadBlock(
                 *cid, reason,
@@ -1771,4 +1638,61 @@ async fn validate_tipset_against_cache(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use cid::Cid;
+    use forest_blocks::{BlockHeader, ElectionProof, Ticket, Tipset};
+    use forest_crypto::VRFProof;
+    use forest_shim::address::Address;
+    use num_bigint::BigInt;
+
+    use super::*;
+
+    pub fn mock_block(id: u64, weight: u64, ticket_sequence: u64) -> BlockHeader {
+        let addr = Address::new_id(id);
+        let cid =
+            Cid::try_from("bafyreicmaj5hhoy5mgqvamfhgexxyergw7hdeshizghodwkjg6qmpoco7i").unwrap();
+
+        let fmt_str = format!("===={ticket_sequence}=====");
+        let ticket = Ticket::new(VRFProof::new(fmt_str.clone().into_bytes()));
+        let election_proof = ElectionProof {
+            win_count: 0,
+            vrfproof: VRFProof::new(fmt_str.into_bytes()),
+        };
+        let weight_inc = BigInt::from(weight);
+        BlockHeader::builder()
+            .miner_address(addr)
+            .election_proof(Some(election_proof))
+            .ticket(Some(ticket))
+            .message_receipts(cid)
+            .messages(cid)
+            .state_root(cid)
+            .weight(weight_inc)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    pub fn test_heaviest_weight() {
+        // ticket_sequence are chosen so that Ticket(b3) < Ticket(b1)
+
+        let b1 = mock_block(1234561, 10, 2);
+        let ts1 = Tipset::from(b1);
+
+        let b2 = mock_block(1234563, 9, 1);
+        let ts2 = Tipset::from(b2);
+
+        let b3 = mock_block(1234562, 10, 1);
+        let ts3 = Tipset::from(b3);
+
+        let mut tsg = TipsetGroup::new(Arc::new(ts1));
+        assert!(tsg.try_add_tipset(Arc::new(ts2)).is_none());
+        assert!(tsg.try_add_tipset(Arc::new(ts3)).is_none());
+
+        let (index, weight) = tsg.heaviest_weight();
+        assert_eq!(index, 2);
+        assert_eq!(weight, &BigInt::from(10));
+    }
 }

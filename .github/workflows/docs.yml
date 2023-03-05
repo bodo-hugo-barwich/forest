@@ -1,30 +1,84 @@
-name: Documentation
+name: Docs
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  # https://doc.rust-lang.org/nightly/rustdoc/unstable-features.html#--index-page-provide-a-top-level-landing-page-for-docs
+  RUSTDOCFLAGS: "-Dwarnings -Zunstable-options --enable-index-page"
+  CACHE_TIMEOUT_MINUTES: 5
 
 jobs:
-  publish-docs:
-    name: Publish Docs
+  check-publish-docs:
+    name: Publish
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Sources
-        uses: actions/checkout@v2
-      - name: Install Toolchain
-        uses: actions-rs/toolchain@v1
-      - name: Install MDBook
-        run: |
-          cargo install mdbook
-      - name: Execute MDBook
-        run: |
-          mdbook build ./documentation/
-      - name: Build Rust Docs
-        run: |
-          bash ./scripts/build-rust-docs.sh
-      - name: Deploy GH Pages
-        uses: JamesIves/github-pages-deploy-action@4.2.2
+        uses: actions/checkout@v3
+      - name: Apt Dependencies
+        uses: nick-fields/retry@v2
         with:
-            branch: gh-pages
-            folder: ./documentation/book/
+          timeout_minutes: 5
+          max_attempts: 3
+          command: sudo make install-deps
+      - name: Link Checker (Repo)
+        uses: lycheeverse/lychee-action@v1.5.4
+        with:
+          args: --verbose --timeout 60 --exclude twitter.com --no-progress 'README.md'
+          # Fail action on broken links
+          fail: true
+      - uses: hanabi1224/cache-cargo-bin-action@v1.0.0
+      - name: Install MDBook
+        run: make install-doc-tools
+        env:
+          RUSTFLAGS: "-Cstrip=symbols"
+      - name: Setup sccache
+        uses: hanabi1224/sccache-action@v1.2.0
+        timeout-minutes: ${{ fromJSON(env.CACHE_TIMEOUT_MINUTES) }}
+        continue-on-error: true
+        with:
+          release-name: v0.3.1
+          cache-key: ${{ runner.os }}-sccache-docs-${{ hashFiles('rust-toolchain.toml') }}
+          # true: always save cache
+          # false: only save when cache is not found
+          # this option is only available in the forked action
+          # the original action has no activities for years so we
+          # just keep using the fork
+          cache-update: ${{ github.event_name != 'pull_request' }}
+      - name: Execute MDBook
+        run: make mdbook-build
+      - name: Build rustdoc
+        run: make rustdoc
+        env:
+          CC: "sccache clang"
+          CXX: "sccache clang++"
+      - name: Link Checker (Docs)
+        uses: lycheeverse/lychee-action@v1.5.4
+        with:
+          # Check all docs
+          args: --verbose --no-progress './target/doc/*/index.html'
+          # Fail action on broken links
+          fail: true
+      - name: Prepare rustdoc for publishing
+        run: mv ./target/doc ./documentation/book/html/rustdoc
+      # The deploy steps are identical expect for name and 'dry-run' attribute.
+      # Ideally this would be refactored.
+      - name: Deploy GH Pages (dry-run)
+        uses: JamesIves/github-pages-deploy-action@v4.4.1
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          branch: gh-pages
+          folder: ./documentation/book/html/
+          dry-run: true
+      - name: Deploy GH Pages
+        uses: JamesIves/github-pages-deploy-action@v4.4.1
+        if: ${{ github.event_name == 'push' }}
+        with:
+          branch: gh-pages
+          folder: ./documentation/book/html/
+          dry-run: false

@@ -1,53 +1,42 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
+#![allow(clippy::unused_async)]
+use std::{convert::TryFrom, str::FromStr};
 
+use base64::{prelude::BASE64_STANDARD, Engine};
+use forest_beacon::Beacon;
+use forest_db::Store;
+use forest_json::{address::json::AddressJson, signature::json::SignatureJson};
+use forest_key_management::{json::KeyInfoJson, Error, Key};
+use forest_rpc_api::{data_types::RPCState, wallet_api::*};
+use forest_shim::{address::Address, econ::TokenAmount, state_tree::StateTree};
+use fvm_ipld_blockstore::Blockstore;
 use jsonrpc_v2::{Data, Error as JsonRpcError, Params};
-use std::convert::TryFrom;
-use std::str::FromStr;
+use num_traits::Zero;
 
-use address::{json::AddressJson, Address};
-use beacon::Beacon;
-use blockstore::BlockStore;
-use crypto::signature::json::SignatureJson;
-use encoding::Cbor;
-use fil_types::verifier::FullVerifier;
-use message::{
-    signed_message::json::SignedMessageJson, unsigned_message::json::UnsignedMessageJson,
-    SignedMessage,
-};
-use num_bigint::BigUint;
-use rpc_api::{data_types::RPCState, wallet_api::*};
-use state_tree::StateTree;
-use wallet::{json::KeyInfoJson, Error, Key};
-
-/// Return the balance from StateManager for a given Address
+/// Return the balance from `StateManager` for a given `Address`
 pub(crate) async fn wallet_balance<DB, B>(
     data: Data<RPCState<DB, B>>,
     Params(params): Params<WalletBalanceParams>,
 ) -> Result<WalletBalanceResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore + Store + Clone + Send + Sync + 'static,
+    B: Beacon,
 {
     let (addr_str,) = params;
     let address = Address::from_str(&addr_str)?;
 
-    let heaviest_ts = data
-        .state_manager
-        .chain_store()
-        .heaviest_tipset()
-        .await
-        .ok_or("No heaviest tipset")?;
+    let heaviest_ts = data.state_manager.chain_store().heaviest_tipset();
     let cid = heaviest_ts.parent_state();
 
     let state = StateTree::new_from_root(data.state_manager.blockstore(), cid)?;
     match state.get_actor(&address) {
         Ok(act) => {
             if let Some(actor) = act {
-                let actor_balance = actor.balance;
-                Ok(actor_balance.to_string())
+                let actor_balance = &actor.balance;
+                Ok(actor_balance.atto().to_string())
             } else {
-                Ok(BigUint::default().to_string())
+                Ok(TokenAmount::zero().atto().to_string())
             }
         }
         Err(e) => Err(e.into()),
@@ -59,30 +48,30 @@ pub(crate) async fn wallet_default_address<DB, B>(
     data: Data<RPCState<DB, B>>,
 ) -> Result<WalletDefaultAddressResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore,
+    B: Beacon,
 {
     let keystore = data.keystore.read().await;
 
-    let addr = wallet::get_default(&*keystore)?;
+    let addr = forest_key_management::get_default(&keystore)?;
     Ok(addr.to_string())
 }
 
-/// Export KeyInfo from the Wallet given its address
+/// Export `KeyInfo` from the Wallet given its address
 pub(crate) async fn wallet_export<DB, B>(
     data: Data<RPCState<DB, B>>,
     Params(params): Params<WalletExportParams>,
 ) -> Result<WalletExportResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore,
+    B: Beacon,
 {
     let (addr_str,) = params;
     let addr = Address::from_str(&addr_str)?;
 
     let keystore = data.keystore.read().await;
 
-    let key_info = wallet::export_key_info(&addr, &*keystore)?;
+    let key_info = forest_key_management::export_key_info(&addr, &keystore)?;
     Ok(KeyInfoJson(key_info))
 }
 
@@ -92,28 +81,28 @@ pub(crate) async fn wallet_has<DB, B>(
     Params(params): Params<WalletHasParams>,
 ) -> Result<WalletHasResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore,
+    B: Beacon,
 {
     let (addr_str,) = params;
     let addr = Address::from_str(&addr_str)?;
 
     let keystore = data.keystore.read().await;
 
-    let key = wallet::find_key(&addr, &*keystore).is_ok();
+    let key = forest_key_management::find_key(&addr, &keystore).is_ok();
     Ok(key)
 }
 
-/// Import Keyinfo to the Wallet, return the Address that corresponds to it
+/// Import `KeyInfo` to the Wallet, return the Address that corresponds to it
 pub(crate) async fn wallet_import<DB, B>(
     data: Data<RPCState<DB, B>>,
     Params(params): Params<WalletImportParams>,
-) -> Result<WalletBalanceResult, JsonRpcError>
+) -> Result<WalletImportResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore,
+    B: Beacon,
 {
-    let key_info: wallet::KeyInfo = match params.first().cloned() {
+    let key_info: forest_key_management::KeyInfo = match params.first().cloned() {
         Some(key_info) => key_info.into(),
         None => return Err(JsonRpcError::INTERNAL_ERROR),
     };
@@ -142,11 +131,11 @@ pub(crate) async fn wallet_list<DB, B>(
     data: Data<RPCState<DB, B>>,
 ) -> Result<WalletListResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore,
+    B: Beacon,
 {
     let keystore = data.keystore.read().await;
-    Ok(wallet::list_addrs(&*keystore)?
+    Ok(forest_key_management::list_addrs(&keystore)?
         .into_iter()
         .map(AddressJson::from)
         .collect())
@@ -158,16 +147,16 @@ pub(crate) async fn wallet_new<DB, B>(
     Params(params): Params<WalletNewParams>,
 ) -> Result<WalletNewResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore,
+    B: Beacon,
 {
     let (sig_raw,) = params;
     let mut keystore = data.keystore.write().await;
-    let key = wallet::generate_key(sig_raw.0)?;
+    let key = forest_key_management::generate_key(sig_raw.0)?;
 
     let addr = format!("wallet-{}", key.address);
     keystore.put(addr, key.key_info.clone())?;
-    let value = keystore.get(&"default".to_string());
+    let value = keystore.get("default");
     if value.is_err() {
         keystore.put("default".to_string(), key.key_info)?
     }
@@ -181,8 +170,8 @@ pub(crate) async fn wallet_set_default<DB, B>(
     Params(params): Params<WalletSetDefaultParams>,
 ) -> Result<WalletSetDefaultResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore,
+    B: Beacon,
 {
     let (address,) = params;
     let mut keystore = data.keystore.write().await;
@@ -200,65 +189,32 @@ pub(crate) async fn wallet_sign<DB, B>(
     Params(params): Params<WalletSignParams>,
 ) -> Result<WalletSignResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore + Store + Clone + Send + Sync + 'static,
+    B: Beacon,
 {
     let state_manager = &data.state_manager;
     let (addr, msg_string) = params;
     let address = addr.0;
-    let heaviest_tipset = data
-        .state_manager
-        .chain_store()
-        .heaviest_tipset()
-        .await
-        .ok_or_else(|| "Could not get heaviest tipset".to_string())?;
+    let heaviest_tipset = data.state_manager.chain_store().heaviest_tipset();
     let key_addr = state_manager
-        .resolve_to_key_addr::<FullVerifier>(&address, &heaviest_tipset)
+        .resolve_to_key_addr(&address, &heaviest_tipset)
         .await?;
     let keystore = &mut *data.keystore.write().await;
-    let key = match wallet::find_key(&key_addr, keystore) {
+    let key = match forest_key_management::find_key(&key_addr, keystore) {
         Ok(key) => key,
         Err(_) => {
-            let key_info = wallet::try_find(&key_addr, keystore)?;
+            let key_info = forest_key_management::try_find(&key_addr, keystore)?;
             Key::try_from(key_info)?
         }
     };
 
-    let sig = wallet::sign(
+    let sig = forest_key_management::sign(
         *key.key_info.key_type(),
         key.key_info.private_key(),
-        &base64::decode(msg_string)?,
+        &BASE64_STANDARD.decode(msg_string)?,
     )?;
 
     Ok(SignatureJson(sig))
-}
-
-/// Sign an UnsignedMessage, return SignedMessage
-pub(crate) async fn wallet_sign_message<DB, B>(
-    data: Data<RPCState<DB, B>>,
-    Params(params): Params<WalletSignMessageParams>,
-) -> Result<WalletSignMessageResult, JsonRpcError>
-where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
-{
-    let (addr_str, UnsignedMessageJson(msg)) = params;
-    let address = Address::from_str(&addr_str)?;
-    let msg_cid = msg.cid()?;
-
-    let keystore = data.keystore.write().await;
-
-    let key = wallet::find_key(&address, &*keystore)?;
-
-    let sig = wallet::sign(
-        *key.key_info.key_type(),
-        key.key_info.private_key(),
-        msg_cid.to_bytes().as_slice(),
-    )?;
-
-    let smsg = SignedMessage::new_from_parts(msg, sig)?;
-
-    Ok(SignedMessageJson(smsg))
 }
 
 /// Verify a Signature, true if verified, false otherwise
@@ -267,13 +223,12 @@ pub(crate) async fn wallet_verify<DB, B>(
     Params(params): Params<WalletVerifyParams>,
 ) -> Result<WalletVerifyResult, JsonRpcError>
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore,
+    B: Beacon,
 {
-    let (addr_str, msg_str, SignatureJson(sig)) = params;
-    let address = Address::from_str(&addr_str)?;
-    let msg = hex::decode(&msg_str)?;
+    let (addr, msg, SignatureJson(sig)) = params;
+    let address = addr.0;
 
-    let ret = sig.verify(&msg, &address).is_ok();
+    let ret = sig.verify(&msg, &address.into()).is_ok();
     Ok(ret)
 }

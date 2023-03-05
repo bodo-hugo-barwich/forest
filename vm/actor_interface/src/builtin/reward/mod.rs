@@ -1,208 +1,91 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use crate::FilterEstimate;
-use fil_types::StoragePower;
-use ipld_blockstore::BlockStore;
+use anyhow::Context;
+use cid::Cid;
+use fvm::state_tree::ActorState;
+use fvm_ipld_blockstore::Blockstore;
+use fvm_shared::{address::Address, econ::TokenAmount};
 use serde::Serialize;
-use std::error::Error;
-use vm::{ActorState, TokenAmount};
+
+use crate::io::get_obj;
 
 /// Reward actor address.
-pub static ADDRESS: &actorv4::REWARD_ACTOR_ADDR = &actorv4::REWARD_ACTOR_ADDR;
+pub const ADDRESS: Address = Address::new_id(2);
 
 /// Reward actor method.
-pub type Method = actorv4::reward::Method;
+pub type Method = fil_actor_reward_v8::Method;
+
+pub fn is_v8_reward_cid(cid: &Cid) -> bool {
+    let known_cids = vec![
+        // calibnet v8
+        Cid::try_from("bafk2bzaceayah37uvj7brl5no4gmvmqbmtndh5raywuts7h6tqbgbq2ge7dhu").unwrap(),
+        // mainnet
+        Cid::try_from("bafk2bzacecwzzxlgjiavnc3545cqqil3cmq4hgpvfp2crguxy2pl5ybusfsbe").unwrap(),
+        // devnet
+        Cid::try_from("bafk2bzacedn3fkp27ys5dxn4pwqdq2atj2x6cyezxuekdorvjwi7zazirgvgy").unwrap(),
+    ];
+    known_cids.contains(cid)
+}
+
+pub fn is_v9_reward_cid(cid: &Cid) -> bool {
+    let known_cids = vec![
+        // calibnet v9
+        Cid::try_from("bafk2bzacebpptqhcw6mcwdj576dgpryapdd2zfexxvqzlh3aoc24mabwgmcss").unwrap(),
+        // mainnet v9
+        Cid::try_from("bafk2bzacebezgbbmcm2gbcqwisus5fjvpj7hhmu5ubd37phuku3hmkfulxm2o").unwrap(),
+    ];
+    known_cids.contains(cid)
+}
+
+pub fn is_v10_reward_cid(cid: &Cid) -> bool {
+    let known_cids = vec![
+        // calibnet v10
+        Cid::try_from("bafk2bzacea3yo22x4dsh4axioshrdp42eoeugef3tqtmtwz5untyvth7uc73o").unwrap(),
+        // mainnet v10
+        Cid::try_from("bafk2bzacedbeexrv2d4kiridcvqgdatcwo2an4xsmg3ckdrptxu6c3y7mm6ji").unwrap(),
+    ];
+    known_cids.contains(cid)
+}
 
 /// Reward actor state.
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum State {
-    V0(actorv0::reward::State),
-    V2(actorv2::reward::State),
-    V3(actorv3::reward::State),
-    V4(actorv4::reward::State),
-    V5(actorv5::reward::State),
-    V6(actorv6::reward::State),
+    V8(fil_actor_reward_v8::State),
+    V9(fil_actor_reward_v9::State),
+    V10(fil_actor_reward_v10::State),
 }
 
 impl State {
-    pub fn load<BS>(store: &BS, actor: &ActorState) -> Result<State, Box<dyn Error>>
+    pub fn load<BS>(store: &BS, actor: &ActorState) -> anyhow::Result<State>
     where
-        BS: BlockStore,
+        BS: Blockstore,
     {
-        if actor.code == *actorv0::REWARD_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V0)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else if actor.code == *actorv2::REWARD_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V2)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else if actor.code == *actorv3::REWARD_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V3)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else if actor.code == *actorv4::REWARD_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V4)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else if actor.code == *actorv5::REWARD_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V5)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else if actor.code == *actorv6::REWARD_ACTOR_CODE_ID {
-            Ok(store
-                .get(&actor.state)?
-                .map(State::V6)
-                .ok_or("Actor state doesn't exist in store")?)
-        } else {
-            Err(format!("Unknown actor code {}", actor.code).into())
+        if is_v8_reward_cid(&actor.code) {
+            return get_obj(store, &actor.state)?
+                .map(State::V8)
+                .context("Actor state doesn't exist in store");
         }
+        if is_v9_reward_cid(&actor.code) {
+            return get_obj(store, &actor.state)?
+                .map(State::V8)
+                .context("Actor state doesn't exist in store");
+        }
+        if is_v10_reward_cid(&actor.code) {
+            return get_obj(store, &actor.state)?
+                .map(State::V10)
+                .context("Actor state doesn't exist in store");
+        }
+        Err(anyhow::anyhow!("Unknown reward actor code {}", actor.code))
     }
 
     /// Consume state to return just storage power reward
-    pub fn into_total_storage_power_reward(self) -> StoragePower {
+    pub fn into_total_storage_power_reward(self) -> TokenAmount {
         match self {
-            State::V0(st) => st.into_total_storage_power_reward(),
-            State::V2(st) => st.into_total_storage_power_reward(),
-            State::V3(st) => st.into_total_storage_power_reward(),
-            State::V4(st) => st.into_total_storage_power_reward(),
-            State::V5(st) => st.into_total_storage_power_reward(),
-            State::V6(st) => st.into_total_storage_power_reward(),
-        }
-    }
-
-    pub fn pre_commit_deposit_for_power(
-        &self,
-        network_qa_power: FilterEstimate,
-        sector_weight: &StoragePower,
-    ) -> TokenAmount {
-        match self {
-            State::V0(st) => actorv0::miner::pre_commit_deposit_for_power(
-                &st.this_epoch_reward_smoothed,
-                &actorv0::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                sector_weight,
-            ),
-            State::V2(st) => actorv2::miner::pre_commit_deposit_for_power(
-                &st.this_epoch_reward_smoothed,
-                &actorv2::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                sector_weight,
-            ),
-            State::V3(st) => actorv3::miner::pre_commit_deposit_for_power(
-                &st.this_epoch_reward_smoothed,
-                &actorv3::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                sector_weight,
-            ),
-            State::V4(st) => actorv4::miner::pre_commit_deposit_for_power(
-                &st.this_epoch_reward_smoothed,
-                &actorv4::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                sector_weight,
-            ),
-            State::V5(st) => actorv5::miner::pre_commit_deposit_for_power(
-                &st.this_epoch_reward_smoothed,
-                &actorv5::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                sector_weight,
-            ),
-            State::V6(st) => actorv6::miner::pre_commit_deposit_for_power(
-                &st.this_epoch_reward_smoothed,
-                &actorv6::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                sector_weight,
-            ),
-        }
-    }
-
-    pub fn initial_pledge_for_power(
-        &self,
-        sector_weight: &StoragePower,
-        _network_total_pledge: &TokenAmount,
-        network_qa_power: FilterEstimate,
-        circ_supply: &TokenAmount,
-    ) -> TokenAmount {
-        match self {
-            State::V0(st) => actorv0::miner::initial_pledge_for_power(
-                sector_weight,
-                &st.this_epoch_baseline_power,
-                &st.this_epoch_reward_smoothed,
-                &actorv0::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                circ_supply,
-            ),
-            State::V2(st) => actorv2::miner::initial_pledge_for_power(
-                sector_weight,
-                &st.this_epoch_baseline_power,
-                &st.this_epoch_reward_smoothed,
-                &actorv2::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                circ_supply,
-            ),
-            State::V3(st) => actorv3::miner::initial_pledge_for_power(
-                sector_weight,
-                &st.this_epoch_baseline_power,
-                &st.this_epoch_reward_smoothed,
-                &actorv3::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                circ_supply,
-            ),
-            State::V4(st) => actorv4::miner::initial_pledge_for_power(
-                sector_weight,
-                &st.this_epoch_baseline_power,
-                &st.this_epoch_reward_smoothed,
-                &actorv4::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                circ_supply,
-            ),
-            State::V5(st) => actorv5::miner::initial_pledge_for_power(
-                sector_weight,
-                &st.this_epoch_baseline_power,
-                &st.this_epoch_reward_smoothed,
-                &actorv5::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                circ_supply,
-            ),
-            State::V6(st) => actorv6::miner::initial_pledge_for_power(
-                sector_weight,
-                &st.this_epoch_baseline_power,
-                &st.this_epoch_reward_smoothed,
-                &actorv6::util::smooth::FilterEstimate {
-                    position: network_qa_power.position,
-                    velocity: network_qa_power.velocity,
-                },
-                circ_supply,
-            ),
+            State::V8(st) => st.into_total_storage_power_reward(),
+            State::V9(st) => st.into_total_storage_power_reward(),
+            State::V10(st) => st.into_total_storage_power_reward(),
         }
     }
 }

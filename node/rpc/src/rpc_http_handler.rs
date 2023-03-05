@@ -1,53 +1,49 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
+use axum::response::IntoResponse;
+use forest_beacon::Beacon;
+use forest_rpc_api::data_types::JsonRpcServerState;
+use fvm_ipld_blockstore::Blockstore;
+use http::{HeaderMap, StatusCode};
 use jsonrpc_v2::RequestObject as JsonRpcRequestObject;
-use rpc_api::data_types::JsonRpcServerState;
-use tide::http::{format_err, Error as HttpError, Method};
-
-use beacon::Beacon;
-use blockstore::BlockStore;
 
 use crate::rpc_util::{call_rpc_str, check_permissions, get_auth_header, is_streaming_method};
 
-pub async fn rpc_http_handler<DB, B>(request: tide::Request<JsonRpcServerState>) -> tide::Result
+pub async fn rpc_http_handler<DB, B>(
+    headers: HeaderMap,
+    axum::extract::State(rpc_server): axum::extract::State<JsonRpcServerState>,
+    axum::Json(rpc_call): axum::Json<JsonRpcRequestObject>,
+) -> impl IntoResponse
 where
-    DB: BlockStore + Send + Sync + 'static,
-    B: Beacon + Send + Sync + 'static,
+    DB: Blockstore + Send + Sync + 'static,
+    B: Beacon,
 {
-    let (auth_header, mut request) = get_auth_header(request);
-    let rpc_call: JsonRpcRequestObject = request.body_json().await?;
-    let rpc_server = request.state();
-
-    if request.method() != Method::Post {
-        return Err(format_err!("HTTP JSON RPC calls must use POST HTTP method"));
-    } else if let Some(content_type) = request.content_type() {
-        match content_type.essence() {
-            "application/json-rpc" => {}
-            "application/json" => {}
-            "application/jsonrequest" => {}
-            _ => {
-                return Err(format_err!(
-                    "HTTP JSON RPC calls must provide an appropriate Content-Type header"
-                ));
-            }
-        }
+    let response_headers = [("content-type", "application/json-rpc;charset=utf-8")];
+    if let Err((code, msg)) = check_permissions::<DB, B>(
+        rpc_server.clone(),
+        rpc_call.method_ref(),
+        get_auth_header(headers),
+    )
+    .await
+    {
+        return (code, response_headers, msg);
     }
-
-    check_permissions::<DB, B>(rpc_server.clone(), rpc_call.method_ref(), auth_header).await?;
 
     if is_streaming_method(rpc_call.method_ref()) {
-        return Err(HttpError::from_str(
-            500,
-            "This endpoint cannot handle streaming methods",
-        ));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            response_headers,
+            "This endpoint cannot handle streaming methods".into(),
+        );
     }
 
-    let result = call_rpc_str(rpc_server.clone(), rpc_call).await?;
-    let response = tide::Response::builder(200)
-        .body(result)
-        .content_type("application/json-rpc;charset=utf-8")
-        .build();
-
-    Ok(response)
+    match call_rpc_str(rpc_server.clone(), rpc_call).await {
+        Ok(result) => (StatusCode::OK, response_headers, result),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            response_headers,
+            err.to_string(),
+        ),
+    }
 }

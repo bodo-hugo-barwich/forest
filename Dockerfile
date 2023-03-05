@@ -1,40 +1,86 @@
 # This Dockerfile is for the main forest binary
-# Example usage:
+# 
+# Build and run locally:
+# ```
 # docker build -t forest:latest -f ./Dockerfile .
-# docker run forest
+# docker run --init -it forest
+# ```
+# 
+# Build and manually push to Github Container Registry (see https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
+# ```
+# docker build -t ghcr.io/chainsafe/forest:latest .
+# docker push ghcr.io/chainsafe/forest:latest
+# ```
 
-FROM rust:1-buster AS build-env
+##
+# Build stage
+# Use github action runner cached images to avoid being rate limited
+# https://github.com/actions/runner-images/blob/main/images/linux/Ubuntu2004-Readme.md#cached-docker-images
+## 
 
-WORKDIR /usr/src/forest
+# Cross-compilation helpers
+# https://github.com/tonistiigi/xx
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.2.1 AS xx
+
+FROM --platform=$BUILDPLATFORM buildpack-deps:bullseye AS build-env
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --no-modify-path --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Copy the cross-compilation scripts 
+COPY --from=xx / /
+
+# install dependencies
+RUN apt-get update && apt-get install --no-install-recommends -y build-essential clang protobuf-compiler cmake
+
+# export TARGETPLATFORM
+ARG TARGETPLATFORM
+
+# Install those packages for the target architecture
+RUN xx-apt-get update && xx-apt-get install -y libc6-dev g++ ocl-icd-opencl-dev
+
+WORKDIR /forest
 COPY . .
 
-# Install protoc
-ENV PROTOC_ZIP protoc-3.7.1-linux-x86_64.zip
-RUN curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v3.7.1/$PROTOC_ZIP
-RUN unzip -o $PROTOC_ZIP -d /usr/local bin/protoc
-RUN unzip -o $PROTOC_ZIP -d /usr/local 'include/*'
-RUN rm -f $PROTOC_ZIP
+# Install Forest. Move it out of the cache for the prod image.
+RUN --mount=type=cache,sharing=private,target=/root/.cargo/registry \
+    --mount=type=cache,sharing=private,target=/root/.rustup \
+    --mount=type=cache,sharing=private,target=/forest/target \
+    make install-xx && \
+    mkdir /forest_out && \
+    cp /root/.cargo/bin/forest* /forest_out
 
-# Extra dependencies needed for rust-fil-proofs
-RUN apt-get update && \
-    apt-get install --no-install-recommends -y curl file gcc g++ hwloc libhwloc-dev git make openssh-client \
-    ca-certificates autoconf automake cmake libtool libcurl4 libcurl4-openssl-dev libssl-dev \
-    libelf-dev libdw-dev binutils-dev zlib1g-dev libiberty-dev wget \
-    xz-utils pkg-config python clang ocl-icd-opencl-dev
-
-RUN cargo install --path forest
-
+##
 # Prod image for forest binary
-FROM debian:buster-slim
+# Use github action runner cached images to avoid being rate limited
+# https://github.com/actions/runner-images/blob/main/images/linux/Ubuntu2004-Readme.md#cached-docker-images
+##
+FROM ubuntu:22.04
 
+# Link package to the repository
+LABEL org.opencontainers.image.source https://github.com/chainsafe/forest
+ARG SERVICE_USER=forest
+ARG SERVICE_GROUP=forest
+ARG DATA_DIR=/home/forest/.local/share/forest
+
+ENV DEBIAN_FRONTEND="noninteractive"
 # Install binary dependencies
-RUN apt-get update && \
-    apt-get install --no-install-recommends -y curl file gcc g++ hwloc libhwloc-dev make openssh-client \
-    autoconf automake cmake libtool libcurl4 libcurl4-openssl-dev libssl-dev \
-    libelf-dev libdw-dev binutils-dev zlib1g-dev libiberty-dev wget \
-    xz-utils pkg-config python clang ocl-icd-opencl-dev ca-certificates
+RUN apt-get update && apt-get install --no-install-recommends -y ocl-icd-libopencl1 aria2 ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN update-ca-certificates
 
-# Copy over binaries from the build-env
-COPY --from=build-env /usr/local/cargo/bin/forest /usr/local/bin/forest
+# Create user and group and assign appropriate rights to the forest binaries
+RUN addgroup --gid 1000 ${SERVICE_GROUP} && adduser --uid 1000 --ingroup ${SERVICE_GROUP} --disabled-password --gecos "" ${SERVICE_USER}
 
-CMD ["forest"]
+# Copy forest daemon and cli binaries from the build-env
+COPY --from=build-env --chown=${SERVICE_USER}:${SERVICE_GROUP} /forest_out/* /usr/local/bin/
+
+# Initialize data directory with proper permissions
+RUN mkdir -p ${DATA_DIR} && chown -R ${SERVICE_USER}:${SERVICE_GROUP} ${DATA_DIR}
+
+USER ${SERVICE_USER}
+WORKDIR /home/${SERVICE_USER}
+
+# Basic verification of dynamically linked dependencies
+RUN forest -V
+RUN forest-cli -V
+
+ENTRYPOINT ["forest"]

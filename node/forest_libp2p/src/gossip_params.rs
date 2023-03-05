@@ -1,18 +1,20 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use crate::{PUBSUB_BLOCK_STR, PUBSUB_MSG_STR};
+use std::time::Duration;
+
 use libp2p::gossipsub::{
     score_parameter_decay, IdentTopic, PeerScoreParams, PeerScoreThresholds, TopicScoreParams,
 };
-use std::{collections::HashMap, time::Duration};
 
-// All these parameters are copied from what Lotus has set for their Topic scores.
-// They are currently unused because enabling them causes GossipSub blocks to come
-// delayed usually by 1 second compared to when we have these parameters disabled.
-// Leaving these here so that we can enable and fix these parameters when they are needed.
+use crate::{PUBSUB_BLOCK_STR, PUBSUB_MSG_STR};
 
-#[allow(dead_code)]
+// All these parameters are copied from what Lotus has set for their Topic
+// scores. They are currently unused because enabling them causes GossipSub
+// blocks to come delayed usually by 1 second compared to when we have these
+// parameters disabled. Leaving these here so that we can enable and fix these
+// parameters when they are needed.
+
 fn build_msg_topic_config() -> TopicScoreParams {
     TopicScoreParams {
         // expected 10 blocks/min
@@ -25,7 +27,7 @@ fn build_msg_topic_config() -> TopicScoreParams {
 
         // deliveries decay after 10min, cap at 100 tx
         first_message_deliveries_weight: 0.5,
-        first_message_deliveries_decay: score_parameter_decay(Duration::from_secs(10 * 60)), // 10mins
+        first_message_deliveries_decay: score_parameter_decay(Duration::from_secs(10 * 60)), /* 10mins */
         // 100 blocks in an hour
         first_message_deliveries_cap: 100.0,
 
@@ -45,7 +47,6 @@ fn build_msg_topic_config() -> TopicScoreParams {
     }
 }
 
-#[allow(dead_code)]
 fn build_block_topic_config() -> TopicScoreParams {
     TopicScoreParams {
         topic_weight: 0.1,
@@ -77,15 +78,15 @@ fn build_block_topic_config() -> TopicScoreParams {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn build_peer_score_params(network_name: &str) -> PeerScoreParams {
-    let mut psp_topics = HashMap::new();
+    #[allow(clippy::disallowed_types)]
+    let mut psp_topics = std::collections::HashMap::new();
 
     // msg topic
-    let msg_topic = IdentTopic::new(format!("{}/{}", PUBSUB_MSG_STR, network_name));
+    let msg_topic = IdentTopic::new(format!("{PUBSUB_MSG_STR}/{network_name}"));
     psp_topics.insert(msg_topic.hash(), build_msg_topic_config());
     // block topic
-    let block_topic = IdentTopic::new(format!("{}/{}", PUBSUB_BLOCK_STR, network_name));
+    let block_topic = IdentTopic::new(format!("{PUBSUB_BLOCK_STR}/{network_name}"));
     psp_topics.insert(block_topic.hash(), build_block_topic_config());
 
     PeerScoreParams {
@@ -109,7 +110,6 @@ pub(crate) fn build_peer_score_params(network_name: &str) -> PeerScoreParams {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn build_peer_score_threshold() -> PeerScoreThresholds {
     PeerScoreThresholds {
         gossip_threshold: -500.0,

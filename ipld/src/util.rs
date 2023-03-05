@@ -1,43 +1,51 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use std::collections::HashSet;
-use std::error::Error as StdError;
+use std::future::Future;
 
 use cid::Cid;
-use encoding::Cbor;
+use fvm_ipld_encoding::from_slice;
 
-use crate::Ipld;
+use crate::{CidHashSet, Ipld};
 
-// Traverses all Cid links, loading all unique values and using the callback function
-// to interact with the data.
-fn traverse_ipld_links<F>(
-    walked: &mut HashSet<Cid>,
+/// Traverses all Cid links, hashing and loading all unique values and using the
+/// callback function to interact with the data.
+#[async_recursion::async_recursion]
+async fn traverse_ipld_links_hash<F, T>(
+    walked: &mut CidHashSet,
     load_block: &mut F,
     ipld: &Ipld,
-) -> Result<(), Box<dyn StdError>>
+) -> Result<(), anyhow::Error>
 where
-    F: FnMut(Cid) -> Result<Vec<u8>, Box<dyn StdError>>,
+    F: FnMut(Cid) -> T + Send,
+    T: Future<Output = Result<Vec<u8>, anyhow::Error>> + Send,
 {
     match ipld {
         Ipld::Map(m) => {
             for (_, v) in m.iter() {
-                traverse_ipld_links(walked, load_block, v)?;
+                traverse_ipld_links_hash(walked, load_block, v).await?;
             }
         }
         Ipld::List(list) => {
             for v in list.iter() {
-                traverse_ipld_links(walked, load_block, v)?;
+                traverse_ipld_links_hash(walked, load_block, v).await?;
             }
         }
         Ipld::Link(cid) => {
-            if cid.codec() == cid::DAG_CBOR {
-                if !walked.insert(*cid) {
+            // WASM blocks are stored as IPLD_RAW. They should be loaded but not traversed.
+            if cid.codec() == fvm_shared::IPLD_RAW {
+                if !walked.insert(cid) {
                     return Ok(());
                 }
-                let bytes = load_block(*cid)?;
-                let ipld = Ipld::unmarshal_cbor(&bytes)?;
-                traverse_ipld_links(walked, load_block, &ipld)?;
+                let _ = load_block(*cid).await?;
+            }
+            if cid.codec() == fvm_ipld_encoding::DAG_CBOR {
+                if !walked.insert(cid) {
+                    return Ok(());
+                }
+                let bytes = load_block(*cid).await?;
+                let ipld = from_slice(&bytes)?;
+                traverse_ipld_links_hash(walked, load_block, &ipld).await?;
             }
         }
         _ => (),
@@ -45,27 +53,28 @@ where
     Ok(())
 }
 
-// Load cids and call [traverse_ipld_links] to resolve recursively.
-pub fn recurse_links<F>(
-    walked: &mut HashSet<Cid>,
+/// Load and hash cids and resolve recursively.
+pub async fn recurse_links_hash<F, T>(
+    walked: &mut CidHashSet,
     root: Cid,
     load_block: &mut F,
-) -> Result<(), Box<dyn StdError>>
+) -> Result<(), anyhow::Error>
 where
-    F: FnMut(Cid) -> Result<Vec<u8>, Box<dyn StdError>>,
+    F: FnMut(Cid) -> T + Send,
+    T: Future<Output = Result<Vec<u8>, anyhow::Error>> + Send,
 {
-    if !walked.insert(root) {
+    if !walked.insert(&root) {
         // Cid has already been traversed
         return Ok(());
     }
-    if root.codec() != cid::DAG_CBOR {
+    if root.codec() != fvm_ipld_encoding::DAG_CBOR {
         return Ok(());
     }
 
-    let bytes = load_block(root)?;
-    let ipld = Ipld::unmarshal_cbor(&bytes)?;
+    let bytes = load_block(root).await?;
+    let ipld = from_slice(&bytes)?;
 
-    traverse_ipld_links(walked, load_block, &ipld)?;
+    traverse_ipld_links_hash(walked, load_block, &ipld).await?;
 
     Ok(())
 }

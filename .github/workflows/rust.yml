@@ -1,6 +1,7 @@
 name: Rust
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - main
@@ -8,118 +9,77 @@ on:
     branches:
       - main
   schedule:
-    -
-      cron: "0 0 * * *"
+    - cron: "0 0 * * *"
 
 env:
   CI: 1
   CARGO_INCREMENTAL: 1
+  CACHE_TIMEOUT_MINUTES: 5
+  SNAPSHOT_DIRECTORY: /tmp/snapshots
 
 jobs:
   test:
     name: Test
-    runs-on: buildjet-16vcpu-ubuntu-2004
+    runs-on: buildjet-8vcpu-ubuntu-2204
+    timeout-minutes: 30
     steps:
-      - name: Cancel Previous Runs
-        uses: styfle/cancel-workflow-action@0.9.1
-        with:
-          access_token: ${{ github.token }}
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-              curl file gcc g++ git make openssh-client \
-              autoconf automake cmake libtool libcurl4-openssl-dev libssl-dev llvm\
-              libelf-dev libdw-dev binutils-dev zlib1g-dev libiberty-dev wget \
-              xz-utils pkg-config python libclang-6.0-dev clang ocl-icd-opencl-dev libgflags-dev libhwloc-dev
       - name: Checkout Sources
-        uses: actions/checkout@v2
-      - name: Install Toolchain
-        uses: actions-rs/toolchain@v1
+        uses: actions/checkout@v3
+      - name: Setup sccache
+        uses: hanabi1224/sccache-action@v1.2.0
+        timeout-minutes: ${{ fromJSON(env.CACHE_TIMEOUT_MINUTES) }}
+        continue-on-error: true
         with:
-          toolchain: stable
-          override: true
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v1.3.0
-      - name: Cargo Check
-        uses: actions-rs/cargo@v1
+          release-name: v0.3.1
+          cache-key: ${{ runner.os }}-sccache-test-${{ hashFiles('rust-toolchain.toml') }}
+          cache-update: ${{ github.event_name != 'pull_request' }}
+      - name: Apt Dependencies
+        uses: nick-fields/retry@v2
         with:
-          command: check
-      - name: Make Test-All
-        run: make test-all
+          timeout_minutes: 5
+          max_attempts: 3
+          command: sudo make install-deps
+      - uses: actions/setup-go@v3
+        with:
+          go-version-file: "node/forest_libp2p/bitswap/tests/go-app/go.mod"
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: make test-all
+        env:
+          CC: "sccache clang"
+          CXX: "sccache clang++"
 
-  codecov:
-    name: Cover
-    runs-on: buildjet-16vcpu-ubuntu-2004
-    steps:
-      - name: Cancel Previous Runs
-        uses: styfle/cancel-workflow-action@0.9.1
-        with:
-          access_token: ${{ github.token }}
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-              curl file gcc g++ git make openssh-client \
-              autoconf automake cmake libtool libcurl4-openssl-dev libssl-dev llvm\
-              libelf-dev libdw-dev binutils-dev zlib1g-dev libiberty-dev wget \
-              xz-utils pkg-config python libclang-6.0-dev clang ocl-icd-opencl-dev libgflags-dev libhwloc-dev
-      - name: Checkout Sources
-        uses: actions/checkout@v2
-      - name: Install Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v1.3.0
-      - name: Run Tarpaulin
-        uses: actions-rs/tarpaulin@v0.1
-        with:
-          args: '--workspace --release --locked --out Xml --jobs 16 --timeout 600 -- --test-threads 16'
-      - name: Upload CodeCov
-        uses: codecov/codecov-action@v2
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
+  lint-all:
+    name: All lint checks (lint audit spellcheck udeps)
+    runs-on: buildjet-4vcpu-ubuntu-2204
     steps:
       - name: Checkout Sources
-        uses: actions/checkout@v2
-      - name: Install toolchain
-        uses: actions-rs/toolchain@v1
+        uses: actions/checkout@v3
+      - name: Apt Dependencies
+        uses: nick-fields/retry@v2
         with:
-          toolchain: stable
-          override: true
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v1.3.0
-      - name: Install Clippy
-        run: rustup component add clippy
-      - name: Install RustFmt
-        run: rustup component add rustfmt
-      - name: Run Linters
-        run: make lint
-
-  audit:
-    name: Audit
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Sources
-        uses: actions/checkout@v2
-      - name: Install Toolchain
-        uses: actions-rs/toolchain@v1
+          timeout_minutes: 5
+          max_attempts: 3
+          command: |
+            sudo make install-deps
+            sudo apt-get install -y libclang-dev # required dep for cargo-spellcheck
+      - uses: hanabi1224/cache-cargo-bin-action@v1.0.0
+      - name: Install Lint tools
+        run: make install-lint-tools
+        env:
+          RUSTFLAGS: "-Cstrip=symbols"
+      - name: Setup sccache
+        uses: hanabi1224/sccache-action@v1.2.0
+        timeout-minutes: ${{ fromJSON(env.CACHE_TIMEOUT_MINUTES) }}
+        continue-on-error: true
         with:
-          toolchain: stable
-          override: true
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v1.3.0
-      - name: Install Audit
-        run: cargo install cargo-audit
-      - name: Run Audit
-        uses: actions-rs/cargo@v1
-        with:
-          command: audit
-          args: --ignore RUSTSEC-2020-0159 --ignore RUSTSEC-2020-0071 --ignore RUSTSEC-2021-0130 --ignore RUSTSEC-2022-0009
+          release-name: v0.3.1
+          cache-key: ${{ runner.os }}-sccache-lints-${{ hashFiles('rust-toolchain.toml') }}
+          cache-update: ${{ github.event_name != 'pull_request' }}
+      - run: make lint-all
+        env:
+          CC: "sccache clang"
+          CXX: "sccache clang++"
 
   build:
     name: Build
@@ -127,23 +87,120 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        rv: [1.57.0, stable]
     steps:
-      - name: Cancel Previous Runs
-        uses: styfle/cancel-workflow-action@0.9.1
-        with:
-          access_token: ${{ github.token }}
       - name: Checkout Sources
-        uses: actions/checkout@v2
-      - name: Install Toolchain
-        uses: actions-rs/toolchain@v1
+        uses: actions/checkout@v3
+      - name: Install Protoc (MacOS)
+        if: contains(matrix.os, 'macos')
+        run: |
+          brew install protobuf
+          protoc --version
+      - name: Setup sccache
+        uses: hanabi1224/sccache-action@v1.2.0
+        timeout-minutes: ${{ fromJSON(env.CACHE_TIMEOUT_MINUTES) }}
+        continue-on-error: true
         with:
-          toolchain: ${{ matrix.rv }}
-          override: true
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v1.3.0
-      - name: Cargo Build
-        uses: actions-rs/cargo@v1
+          # hard code release-name for macos, it always get rate limited when calling github api
+          release-name: v0.3.1
+          cache-key: ${{ runner.os }}-sccache-${{ hashFiles('rust-toolchain.toml') }}
+          cache-update: ${{ github.event_name != 'pull_request' }}
+      - name: Install Apt Dependencies
+        if: contains(matrix.os, 'ubuntu')
+        run: |
+          lscpu # the job may run on different CPUs, list cpu here for analysing build time
+          sudo make install-deps
+      - name: Cargo Check
+        run: cargo check --timings
+        env:
+          CC: "sccache clang"
+          CXX: "sccache clang++"
+      - uses: actions/upload-artifact@v3
         with:
-          command: build
-          args: --profile dev
+          name: build-timings
+          path: |
+            target/cargo-timings/*
+          if-no-files-found: error
+
+  calibnet-check:
+    name: Calibnet sync check
+    runs-on: buildjet-8vcpu-ubuntu-2204
+    steps:
+      - name: Checkout Sources
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Apt Dependencies
+        uses: nick-fields/retry@v2
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          command: sudo make install-deps
+      - name: Setup sccache
+        uses: hanabi1224/sccache-action@v1.2.0
+        timeout-minutes: ${{ fromJSON(env.CACHE_TIMEOUT_MINUTES) }}
+        continue-on-error: true
+        with:
+          release-name: v0.3.1
+          cache-key: ${{ runner.os }}-sccache-calibnet-check-${{ hashFiles('rust-toolchain.toml') }}
+          cache-update: ${{ github.event_name != 'pull_request' }}
+      - name: build and install binaries
+        run: make install
+        env:
+          CC: "sccache clang"
+          CXX: "sccache clang++"
+      - name: fetch params
+        run: forest-cli fetch-params --keys
+      - name: download snapshot
+        run: forest-cli --chain calibnet snapshot fetch --aria2 -s $SNAPSHOT_DIRECTORY
+      - name: import snapshot and run Forest
+        run: |
+          forest --chain calibnet --target-peer-count 50 --encrypt-keystore false --halt-after-import --height=-200 --import-snapshot $SNAPSHOT_DIRECTORY/*.car
+          forest-cli --chain calibnet db stats
+          forest --chain calibnet --target-peer-count 50 --encrypt-keystore false --log-dir log --detach
+      - name: Validate checkpoint tipset hashes
+        run: forest-cli chain validate-tipset-checkpoints
+      - name: wait for sync and check health
+        timeout-minutes: 30
+        run: |
+          forest-cli --chain calibnet sync wait
+          forest-cli --chain calibnet db stats
+      - name: export snapshot
+        run: |
+          forest-cli --chain calibnet snapshot export
+          sha256sum -c *.sha256sum
+      - name: js console
+        run: forest-cli attach --exec 'showPeers()'
+      - name: net subcommand
+        run: |
+          forest-cli net listen
+          forest-cli net peers
+      - name: validate snapshot
+        run: |
+          forest-cli --chain mainnet snapshot validate $SNAPSHOT_DIRECTORY/*.car --force &&
+          { echo "mainnet snapshot validation with calibnet snapshot should fail"; return 1; }
+          forest-cli --chain calibnet snapshot validate $SNAPSHOT_DIRECTORY/*.car --force
+      - name: print forest logs
+        run: |
+          wget -O metrics.log http://localhost:6116/metrics
+          pkill forest
+          echo "--- Forest STDOUT ---"; cat forest.out
+          echo "--- Forest STDERR ---"; cat forest.err
+          echo "--- Forest Prometheus metrics ---"; cat metrics.log
+      - name: print forest log files
+        run: |
+          ls -hl log
+          cat log/*
+
+  dependencies-check:
+    name: Check cargo files for duplicates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.0"
+      - name: Run dependencies checks
+        run: |
+          gem install toml-rb --no-document
+          ruby scripts/find_duplicate_deps.rb && ruby scripts/find_unused_deps.rb

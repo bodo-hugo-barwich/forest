@@ -1,11 +1,12 @@
-// Copyright 2019-2022 ChainSafe Systems
+// Copyright 2019-2023 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
 
-use std::cmp;
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::{
+    cmp,
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+};
 
 use serde::Deserialize;
 use syn::{
@@ -76,7 +77,7 @@ fn map_lotus_type(lotus_param: &str) -> String {
 
     if param.starts_with("[]") {
         param = param.replace("[]", "");
-        param = format!("Vec<{}>", param);
+        param = format!("Vec<{param}>");
     }
 
     if param.starts_with("map[string]") {
@@ -84,7 +85,7 @@ fn map_lotus_type(lotus_param: &str) -> String {
         param.push('>');
     }
 
-    param = param.replace("*", "");
+    param = param.replace('*', "");
     param = param.replace("TipSet", "Tipset");
 
     // Strip namespaces
@@ -118,11 +119,11 @@ fn map_lotus_type(lotus_param: &str) -> String {
 fn compare_types(lotus: &str, forest: &str) -> bool {
     let lotus = lotus.replace("Json", "");
     let lotus = lotus.replace("Option<", "");
-    let lotus = lotus.replace(">", "");
+    let lotus = lotus.replace('>', "");
 
     let forest = forest.replace("Json", "");
     let forest = forest.replace("Option<", "");
-    let forest = forest.replace(">", "");
+    let forest = forest.replace('>', "");
 
     lotus.trim_end_matches("Json") != forest.trim_end_matches("Json")
 }
@@ -141,7 +142,7 @@ type Metrics = (
     ForestOnlyMethods,
 );
 
-fn run() -> Result<Metrics, Box<dyn Error>> {
+fn run() -> Result<Metrics, anyhow::Error> {
     let mut lotus_rpc_file = File::open(LOTUS_OPENRPC_JSON_PATH)?;
     let mut lotus_rpc_content = String::new();
     lotus_rpc_file.read_to_string(&mut lotus_rpc_content)?;
@@ -151,7 +152,7 @@ fn run() -> Result<Metrics, Box<dyn Error>> {
     api_lib.read_to_string(&mut api_lib_content)?;
 
     let ast = syn::parse_file(&api_lib_content)?;
-    let out = format!("{:#?}", ast);
+    let out = format!("{ast:#?}");
 
     let mut ast_file = File::create(FOREST_RPC_API_AST_PATH).expect("Create static/ast.ron failed");
     ast_file
@@ -339,12 +340,10 @@ fn main() {
             let mut method_table = vec![];
 
             method_table.push(format!(
-                "| Present | {}{} | {} | {} |",
-                method_header, method_pad_space, params_header, result_header,
+                "| Present | {method_header}{method_pad_space} | {params_header} | {result_header} |",
             ));
             method_table.push(format!(
-                "| ------- | {} | {} | {}",
-                method_pad_dash, params_pad_dash, result_pad_dash
+                "| ------- | {method_pad_dash} | {params_pad_dash} | {result_pad_dash}"
             ));
 
             for (lotus_name, lotus_method) in lotus_rpc.iter() {
@@ -405,7 +404,7 @@ fn main() {
 
             let forest_only_methods_list = forest_only_methods
                 .iter()
-                .map(|method| format!("- `{method}`", method = method))
+                .map(|method| format!("- `{method}`"))
                 .collect::<Vec<String>>();
 
             let report = format!(
@@ -509,8 +508,7 @@ Feel free to reach out in #fil-forest-help in the [Filecoin Slack](https://docs.
         }
         Err(err) => {
             println!(
-                "cargo:warning=Error parsing Lotus OpenRPC file, skipping... Error was: {}",
-                err
+                "cargo:warning=Error parsing Lotus OpenRPC file, skipping... Error was: {err}"
             );
         }
     }
